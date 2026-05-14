@@ -106,6 +106,8 @@ def invoke_planner(
 - 「什麼是…」「解釋…」「介紹…」等僅概念說明、且**未**出現規則 3 的網搜動詞：**todos=[]**；不要自動為「查百科」而加 search_web。
 - 需要開網址、開程式等：從 tool catalog 選正確 skill。
 - 詢問「助理／你本人／Replan／CAI 能做什麼、有哪些任務、自我介紹名字」或短句確認（如「真的嗎」）：屬 **`direct_response` 任務**，**`todos` 必須為 []**，**禁止** `search_web`；在 `message` 簡述理由（例如：使用者詢問助理能力，屬不需工具之任務對答）。
+- 詢問「我是誰」「你是誰」「我媽媽叫什麼」等**身份／關係／名稱回憶**問題時，若 `Context Pack` 已有明說事實，應維持 **`direct_response`**、`todos=[]`，交由後續 Replan 直接依脈絡回答；**不要**因為是人物問題就優先 `ask_user`。
+- 若 `Context Pack` 對同一身份或稱呼有多個版本，請以**較新的使用者明確更正**為準；舊稱呼或較早輪次內容不可覆蓋新版本。
 
 可用技能（JSON）：{tool_catalog_json}
 

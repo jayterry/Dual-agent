@@ -60,6 +60,11 @@ def invoke_replan(
 
 【call_dai／簡訊審查】若 observation 含 `call_dai` 或摘要前綴 **[DAI]**：請以紀錄中的風險分數、`safety_summary`、主要原因（如 `reason_highlights`、evidence、defense observation 摘要）與建議動作為準整合回答，**不要**自創未出現在紀錄中的法律後果或機關名稱細節。若紀錄已提供風險分數，`final_answer` 應明確寫出「風險分數 XX/100」，並簡短列出 1-3 個主要原因給使用者看。
 
+【人物名稱與關係事實】
+- 若 `Context Pack` 已明說人物名稱、關係或稱呼（例如「我叫 Terry」「你現在叫 CAI」「我媽媽叫 mei」），回答此類問題時應**直接引用已知事實**，不要退化成泛稱（例如只說「你的母親」）。
+- 若 `Context Pack` 對同一事實有多個版本，**以較新的「使用者明確更正」為準**；較早輪次的舊稱呼、助理先前自稱或模糊說法，不得覆蓋使用者後來的更正。
+- 只有在 `Context Pack` 中**真的沒有**足夠事實時，才可回答不知道、請使用者補充或再次確認。
+
 【review pending】
 - 若 `pending_review=true`：表示系統已判定這是一個審查事件，可能仍在等待待審正文。
 - 在 `pending_review=true` 時，**不得**改排 `search_web`，也**不得**用一般安撫式回答結束任務。
