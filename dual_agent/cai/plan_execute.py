@@ -11,10 +11,12 @@ User（+ 上下文占位）→ Planner LLM →
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from dual_agent.config import OLLAMA_BASE_URL, OLLAMA_MODEL, max_executor_steps, max_replan_iterations
 from dual_agent.cai.executor import execute_step, format_results_for_display
 from dual_agent.cai.planner_llm import invoke_planner
+from dual_agent.cai.planner_validate import validate_planner_output
 from dual_agent.cai.replan_llm import invoke_replan
 from dual_agent.cai.schemas import PlanExecuteOutcome, PlanStep, ReplanOutput
 from dual_agent.ingress import (
@@ -61,6 +63,11 @@ def _planner_payload(user_text: str, ctx: SkillContext) -> str:
         for name, args in explicit:
             parts.append(json.dumps({"skill": name, "args": dict(args)}, ensure_ascii=False))
     return "\n".join(parts)
+
+
+def _task_snapshot_from_ctx(ctx: SkillContext) -> dict[str, Any] | None:
+    snap = ctx.policy_state.get("task_snapshot")
+    return snap if isinstance(snap, dict) else None
 
 
 def _planner_source_turn_text(user_text: str, ingress: IngressPayload) -> str:
@@ -119,9 +126,8 @@ def _direct_review_ask_user(ctx: SkillContext, ingress: IngressPayload) -> PlanE
 
 
 def _pending_review_should_promote_raw_input(ingress: IngressPayload) -> bool:
-    if bool((ingress.metadata or {}).get("threat_review_candidate")):
-        return True
-    return ingress.detected_task_type == DetectedTaskType.UNKNOWN and ingress.safety_relevant
+    """僅對明確標記之威脅候補自動把本輪原句晉升为 artifact（其餘交 Planner／validate）。"""
+    return bool((ingress.metadata or {}).get("threat_review_candidate"))
 
 
 def _coerce_pending_review_artifact(ingress: IngressPayload) -> IngressPayload:
@@ -133,6 +139,14 @@ def _coerce_pending_review_artifact(ingress: IngressPayload) -> IngressPayload:
     ingress.review_scope = ReviewScope.RAW_INPUT
     ingress.metadata["pending_review_artifact"] = True
     return ingress
+
+
+def compose_review_user_text(*, message: str, artifact: str) -> str:
+    msg = (message or "").strip()
+    art = (artifact or "").strip()
+    if art and msg:
+        return f"{msg}\n\n【待審內容】\n{art}"
+    return art or msg
 
 
 def _direct_review_call_dai_plan(ingress: IngressPayload, context_pack: str | None) -> tuple[list[PlanStep], str, str]:
@@ -148,78 +162,29 @@ def _direct_review_call_dai_plan(ingress: IngressPayload, context_pack: str | No
     return [step], "check", "running"
 
 
-def run_plan_and_execute(
+def _run_replan_loop(
     *,
-    user_text: str,
-    model: str = OLLAMA_MODEL,
-    base_url: str = OLLAMA_BASE_URL,
-    temperature: float = 0.2,
-    ctx: SkillContext | None = None,
-    guard_source: str | None = None,
-    context_pack: str | None = None,
+    normalized_turn: str,
+    task_type: str,
+    task_state: str,
+    initial_plan: list[PlanStep],
+    todos: list[PlanStep],
+    po_message: str,
+    ctx: SkillContext,
+    results: list[SkillResult],
+    executed_trace: list[PlanStep],
+    model: str,
+    base_url: str,
+    temperature: float,
+    context_pack: str | None,
+    active_pending_review: bool,
 ) -> PlanExecuteOutcome:
-    ctx = ctx or SkillContext(user_input=user_text)
-    ctx.user_input = user_text
-    ingress = normalize_ingress(raw_input_text=user_text, input_origin=guard_source or "chat_box")
-    had_pending_review = bool(ctx.policy_state.get("pending_review"))
-    if had_pending_review and not ingress.artifact_text and _pending_review_should_promote_raw_input(ingress):
-        ingress = _coerce_pending_review_artifact(ingress)
-    ctx.policy_state["ingress_payload"] = ingress_payload_to_dict(ingress)
-
-    if ingress.detected_task_type == DetectedTaskType.CHECK and not (ingress.artifact_text or "").strip():
-        return _direct_review_ask_user(ctx, ingress)
-
-    payload = _planner_payload(user_text, ctx)
-    normalized_turn = _planner_source_turn_text(user_text, ingress)
-    direct_call_dai = (
-        ingress.detected_task_type == DetectedTaskType.CHECK
-        and ingress.requires_dai
-        and bool((ingress.artifact_text or "").strip())
-        and (had_pending_review or bool((ingress.metadata or {}).get("threat_review_candidate")))
-    )
-    if direct_call_dai:
-        _clear_pending_review(ctx)
-        todos, task_type, task_state = _direct_review_call_dai_plan(ingress, context_pack)
-        initial_plan = list(todos)
-        po_message = "（已由前置審查入口規則直接轉入 call_dai）"
-        todos_runtime: list[PlanStep] = list(todos)
-        task_type_runtime = task_type
-        task_state_runtime = task_state
-    else:
-        po = invoke_planner(
-            user_text=payload,
-            source_turn_text=normalized_turn,
-            tool_catalog=get_tool_catalog(),
-            model=model,
-            base_url=base_url,
-            temperature=temperature,
-            context_pack=context_pack,
-            ingress_summary=format_ingress_for_prompt(ingress),
-            ingress_detected_task_type=str(ingress.detected_task_type),
-            ingress_artifact_text=ingress.artifact_text,
-            pending_review=had_pending_review,
-        )
-        initial_plan = list(po.todos)
-        todos_runtime = list(po.todos)
-        task_type_runtime = po.task_type
-        task_state_runtime = po.task_state
-        po_message = po.message
-
-    todos: list[PlanStep] = list(todos_runtime)
-    task_type = task_type_runtime
-    task_state = task_state_runtime
-    active_pending_review = bool(ctx.policy_state.get("pending_review"))
-    results: list[SkillResult] = []
     observation_lines: list[str] = []
     observation_log: str | None = None
-    # 僅記錄「實際跑過 Executor」的步驟（含 Replan 後插入的 search_web），供 UI 與 initial_plan 不一致時對齊
-    executed_trace: list[PlanStep] = []
-
     cap = max_replan_iterations()
     exec_cap = max_executor_steps()
     replan_count = 0
     last_ro: ReplanOutput | None = None
-
     while replan_count < cap:
         if todos:
             if len(results) >= exec_cap:
@@ -352,4 +317,178 @@ def run_plan_and_execute(
         ),
         task_type=task_type,
         task_state=task_state,
+    )
+
+
+def run_dai_then_replan(
+    *,
+    message: str,
+    artifact: str,
+    model: str = OLLAMA_MODEL,
+    base_url: str = OLLAMA_BASE_URL,
+    temperature: float = 0.2,
+    ctx: SkillContext | None = None,
+    guard_source: str | None = None,
+    context_pack: str | None = None,
+) -> PlanExecuteOutcome:
+    """
+    手機送審專用：跳過 Planner，固定 call_dai → Replan（仍寫入同一 SkillContext / session）。
+    """
+    art = (artifact or "").strip()
+    user_text = compose_review_user_text(message=message, artifact=artifact)
+    ctx = ctx or SkillContext(user_input=user_text)
+    ctx.user_input = user_text
+    if context_pack:
+        ctx.policy_state["context_pack"] = (context_pack or "").strip()
+    if guard_source:
+        ctx.policy_state["review_source"] = guard_source
+
+    ingress = normalize_ingress(raw_input_text=user_text, input_origin=guard_source or "sms_share")
+    if art and not (ingress.artifact_text or "").strip():
+        ingress.artifact_text = art
+        ingress.detected_task_type = DetectedTaskType.CHECK
+        ingress.requires_dai = True
+        ingress.safety_relevant = True
+        ingress.review_scope = ReviewScope.ARTIFACT_ONLY
+    ctx.policy_state["ingress_payload"] = ingress_payload_to_dict(ingress)
+
+    if not art:
+        return _direct_review_ask_user(ctx, ingress)
+
+    _clear_pending_review(ctx)
+    normalized_turn = _planner_source_turn_text(user_text, ingress)
+    initial_plan, task_type, task_state = _direct_review_call_dai_plan(ingress, context_pack)
+    po_message = "（送審：DAI call_dai 後由 Replan 總結；未經 Planner）"
+
+    results: list[SkillResult] = []
+    executed_trace: list[PlanStep] = []
+    todos = list(initial_plan)
+
+    return _run_replan_loop(
+        normalized_turn=normalized_turn,
+        task_type=task_type,
+        task_state=task_state,
+        initial_plan=initial_plan,
+        todos=todos,
+        po_message=po_message,
+        ctx=ctx,
+        results=results,
+        executed_trace=executed_trace,
+        model=model,
+        base_url=base_url,
+        temperature=temperature,
+        context_pack=context_pack,
+        active_pending_review=False,
+    )
+
+
+def _build_ingress_for_turn(
+    *,
+    user_text: str,
+    artifact: str,
+    guard_source: str,
+) -> IngressPayload:
+    """合併聊天框 user prompt 與可選 artifact，供 ingress 解析。"""
+    msg = (user_text or "").strip()
+    art = (artifact or "").strip()
+    combined = compose_review_user_text(message=msg, artifact=art) if art else msg
+    ingress = normalize_ingress(raw_input_text=combined, input_origin=guard_source)
+    if art and not (ingress.artifact_text or "").strip():
+        ingress.artifact_text = art
+        ingress.detected_task_type = DetectedTaskType.CHECK
+        ingress.requires_dai = True
+        ingress.safety_relevant = True
+        ingress.review_scope = ReviewScope.ARTIFACT_ONLY
+    return ingress
+
+
+def run_plan_and_execute(
+    *,
+    user_text: str,
+    artifact: str = "",
+    model: str = OLLAMA_MODEL,
+    base_url: str = OLLAMA_BASE_URL,
+    temperature: float = 0.2,
+    ctx: SkillContext | None = None,
+    guard_source: str | None = None,
+    context_pack: str | None = None,
+) -> PlanExecuteOutcome:
+    ctx = ctx or SkillContext(user_input=user_text)
+    ctx.user_input = user_text
+    if context_pack:
+        ctx.policy_state["context_pack"] = (context_pack or "").strip()
+    origin = guard_source or "chat_box"
+    ingress = _build_ingress_for_turn(
+        user_text=user_text,
+        artifact=artifact,
+        guard_source=origin,
+    )
+    had_pending_review = bool(ctx.policy_state.get("pending_review"))
+    if had_pending_review and not ingress.artifact_text and _pending_review_should_promote_raw_input(ingress):
+        ingress = _coerce_pending_review_artifact(ingress)
+    ctx.policy_state["ingress_payload"] = ingress_payload_to_dict(ingress)
+
+    snap = _task_snapshot_from_ctx(ctx) or {}
+    payload = _planner_payload(user_text, ctx)
+    normalized_turn = _planner_source_turn_text(user_text, ingress)
+
+    ingress_requires_dai = bool(ingress.requires_dai)
+    review_pending_candidate = bool((ingress.metadata or {}).get("review_pending_candidate"))
+
+    po = invoke_planner(
+        user_text=payload,
+        source_turn_text=normalized_turn,
+        tool_catalog=get_tool_catalog(),
+        model=model,
+        base_url=base_url,
+        temperature=temperature,
+        context_pack=context_pack,
+        ingress_summary=format_ingress_for_prompt(ingress),
+        ingress_detected_task_type=str(ingress.detected_task_type),
+        ingress_artifact_text=ingress.artifact_text,
+        pending_review=had_pending_review,
+        task_snapshot=snap,
+        ingress_requires_dai=ingress_requires_dai,
+        review_pending_candidate=review_pending_candidate,
+    )
+    v_todos, task_type_v, task_state_v, msg_v = validate_planner_output(
+        user_text=normalized_turn,
+        task_type=po.task_type,
+        task_state=po.task_state,
+        todos=list(po.todos),
+        message=po.message,
+        ingress_detected_task_type=str(ingress.detected_task_type),
+        ingress_artifact_text=(ingress.artifact_text or "").strip(),
+        pending_review=had_pending_review,
+        task_snapshot=snap,
+        context_pack=context_pack or "",
+        ingress_requires_dai=ingress_requires_dai,
+        review_pending_candidate=review_pending_candidate,
+    )
+
+    initial_plan = list(v_todos)
+    todos: list[PlanStep] = list(v_todos)
+    task_type = task_type_v
+    task_state = task_state_v
+    po_message = msg_v
+
+    active_pending_review = bool(ctx.policy_state.get("pending_review"))
+    results: list[SkillResult] = []
+    executed_trace: list[PlanStep] = []
+
+    return _run_replan_loop(
+        normalized_turn=normalized_turn,
+        task_type=task_type,
+        task_state=task_state,
+        initial_plan=initial_plan,
+        todos=todos,
+        po_message=po_message,
+        ctx=ctx,
+        results=results,
+        executed_trace=executed_trace,
+        model=model,
+        base_url=base_url,
+        temperature=temperature,
+        context_pack=context_pack,
+        active_pending_review=active_pending_review,
     )

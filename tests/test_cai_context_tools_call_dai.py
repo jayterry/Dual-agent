@@ -6,7 +6,7 @@ from desktop_cai_app import _build_memory_assistant_text
 from dual_agent.cai.context_layer import SessionMemory, build_plan_summary, pack_context, record_turn
 from dual_agent.cai.executor import format_results_for_display
 from dual_agent.cai.plan_execute import run_plan_and_execute
-from dual_agent.cai.schemas import PlanExecuteOutcome, PlannerOutput, ReplanOutput
+from dual_agent.cai.schemas import PlanExecuteOutcome, PlanStep, PlannerOutput, ReplanOutput
 from dual_agent.skill_types import SkillContext, SkillResult
 
 import dual_agent.cai.plan_execute as plan_execute
@@ -53,8 +53,34 @@ def test_multi_turn_review_regression_keeps_memory_clean_for_followup(monkeypatc
         ingress_detected_task_type: str = "",
         ingress_artifact_text: str = "",
         pending_review: bool = False,
+        task_snapshot: dict | None = None,
+        ingress_requires_dai: bool = False,
+        review_pending_candidate: bool = False,
     ) -> PlannerOutput:
         assert tool_catalog
+        if "有人發簡訊給我" in user_text:
+            assert pending_review is False
+            return PlannerOutput(task_type="check", task_state="new", todos=[], message="")
+        if "3000萬" in user_text and "殺" in user_text:
+            art = (ingress_artifact_text or "").strip()
+            assert art
+            assert pending_review is True
+            return PlannerOutput(
+                task_type="check",
+                task_state="running",
+                todos=[
+                    PlanStep(
+                        skill="call_dai",
+                        args={
+                            "artifact": art,
+                            "user_text": user_text.strip()[:240],
+                            "context_pack": "",
+                            "sms_review": True,
+                        },
+                    )
+                ],
+                message="",
+            )
         assert user_text == "我現在該怎麼辦?"
         assert source_turn_text == "我現在該怎麼辦?"
         assert ingress_detected_task_type == "unknown"
@@ -69,10 +95,14 @@ def test_multi_turn_review_regression_keeps_memory_clean_for_followup(monkeypatc
         assert "計畫步驟數：" not in cp
         return PlannerOutput(task_type="direct_response", task_state="answering", todos=[], message="依前文回答。")
 
-    def fake_execute_step(step: object, _ctx: SkillContext) -> SkillResult:
-        executed.append(step)
+    def fake_execute_step(step: object, ctx: SkillContext) -> SkillResult:
         skill = getattr(step, "skill", "")
-        assert skill == "call_dai"
+        if skill != "call_dai":
+            from dual_agent.cai.executor import execute_step as real_execute_step
+
+            return real_execute_step(step, ctx)
+        executed.append(step)
+        ctx.policy_state.pop("pending_review", None)
         args = getattr(step, "args", {})
         assert "3000萬" in str(args.get("artifact") or "")
         assert args.get("sms_review") is True
@@ -104,10 +134,23 @@ def test_multi_turn_review_regression_keeps_memory_clean_for_followup(monkeypatc
         context_pack: str | None = None,
         pending_review: bool = False,
     ) -> ReplanOutput:
+        if "有人發簡訊給我" in user_text and observation_log and "ask_user" in observation_log:
+            assert task_type == "check"
+            return ReplanOutput(
+                complete=True,
+                final_answer=(
+                    "請貼上完整簡訊或訊息內容，我才能幫您進一步審查。"
+                    "若您本人或家人有立即危險，請先聯絡警方或當地緊急單位。"
+                ),
+                updated_todos=[],
+                task_state="waiting_input",
+                waiting_input=False,
+                user_prompt="",
+            )
         if "3000萬" in user_text:
             assert task_type == "check"
             assert task_state == "running"
-            assert pending_review is False
+            assert pending_review is True
             assert "call_dai" in (observation_log or "")
             assert "風險分數：95/100" in (observation_log or "")
             return ReplanOutput(
@@ -259,6 +302,9 @@ def test_identity_question_prefers_latest_user_name_correction_from_context(monk
         ingress_detected_task_type: str = "",
         ingress_artifact_text: str = "",
         pending_review: bool = False,
+        task_snapshot: dict | None = None,
+        ingress_requires_dai: bool = False,
+        review_pending_candidate: bool = False,
     ) -> PlannerOutput:
         assert tool_catalog
         assert source_turn_text == "我是誰 \n你又是誰"
@@ -377,6 +423,9 @@ def test_relation_name_question_prefers_newer_user_fact_from_context(monkeypatch
         ingress_detected_task_type: str = "",
         ingress_artifact_text: str = "",
         pending_review: bool = False,
+        task_snapshot: dict | None = None,
+        ingress_requires_dai: bool = False,
+        review_pending_candidate: bool = False,
     ) -> PlannerOutput:
         assert tool_catalog
         assert user_text == "我媽媽叫甚麼"
@@ -540,6 +589,9 @@ def test_full_transcript_regression_prefers_cai_and_mei_over_older_or_generic_me
         ingress_detected_task_type: str = "",
         ingress_artifact_text: str = "",
         pending_review: bool = False,
+        task_snapshot: dict | None = None,
+        ingress_requires_dai: bool = False,
+        review_pending_candidate: bool = False,
     ) -> PlannerOutput:
         assert tool_catalog
         cp = context_pack or ""

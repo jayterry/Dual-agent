@@ -32,6 +32,18 @@ def handle(args: dict[str, Any], ctx: SkillContext) -> SkillResult:
         "rationale": rationale or None,
         "expected_task": expected_task,
     }
+    if expected_task == "check":
+        ing = ctx.policy_state.get("ingress_payload")
+        origin = (
+            str((ing or {}).get("input_origin") or "chat_box").strip()
+            if isinstance(ing, dict)
+            else "chat_box"
+        )
+        ctx.policy_state["pending_review"] = {
+            "active": True,
+            "source_turn": str(ctx.user_input or "").strip()[:2000],
+            "input_origin": origin,
+        }
     data = {"question": q}
     if rationale:
         data["rationale"] = rationale

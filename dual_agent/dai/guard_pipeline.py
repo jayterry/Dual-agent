@@ -11,6 +11,7 @@ from dual_agent.dai.defense_llm import invoke_defense_guard_scan
 from dual_agent.dai.schemas import DAIRequest
 from dual_agent.dai.toxic_chroma import match_toxic_chroma
 from dual_agent.dai.toxic_fusion import ToxicMatch, fuse_risk, match_toxic
+from dual_agent.dai.user_db import apply_ueba_to_report
 
 
 def _text_for_pipeline(req: DAIRequest) -> str:
@@ -42,7 +43,7 @@ def run_guard_analysis_pipeline(
     1) Defense 單次審查（`invoke_defense_guard_scan` → R_llm = report.risk_score_total）
     2) Toxic：TOXIC_CHROMA_PERSIST_DIR + TOXIC_CHROMA_COLLECTION 優先，否則 TOXIC_DB_PATH JSON
     3) 0.75/0.25 融合
-    4) UEBA：目前為佔位（delta_user=0），日後可接 user_profile
+    4) UEBA：user_db（來源 + 信任網域）
     5) gate_tier 依融合分數
     """
     text = _text_for_pipeline(req)
@@ -75,16 +76,6 @@ def run_guard_analysis_pipeline(
     fused = fuse_risk(r_llm_0_100=int(report.risk_score_total), s_tox_0_100=int(tm.s_tox_0_100))
     src = (source or "desktop").strip() or "unknown"
 
-    risk_user: dict[str, Any] = {
-        "source": src,
-        "delta_user": 0,
-        "s_user_0_100": 0,
-        "trust_status": "UNKNOWN",
-        "reasons": ["ueba_placeholder: 尚未接入使用者行為風險（UEBA）模組"],
-        "risk_total_user_fused": int(fused.risk_total_0_100),
-    }
-    risk_total_user_fused = int(max(0, min(100, fused.risk_total_0_100 + int(risk_user["delta_user"]))))
-
     report_dict["risk_fusion"] = {
         "r_llm": fused.r_llm_0_100,
         "s_tox": fused.s_tox_0_100,
@@ -101,15 +92,14 @@ def run_guard_analysis_pipeline(
         },
     }
     report_dict["risk_score_total_fused"] = fused.risk_total_0_100
-    report_dict["risk_user"] = risk_user
-    report_dict["risk_user"]["risk_total_user_fused"] = risk_total_user_fused
-    report_dict["risk_score_total_user_fused"] = risk_total_user_fused
+    apply_ueba_to_report(report_dict, text=text, source=src)
+    risk_total_user_fused = int(report_dict.get("risk_score_total_user_fused") or fused.risk_total_0_100)
     report_dict["gate_tier"] = _gate_tier(risk_total_user_fused)
     report_dict["pipeline_phases"] = [
         "defense_guard_scan",
         "toxic_match",
         "fuse_risk",
-        "ueba_placeholder",
+        "ueba_user_db",
         "gate_tier",
     ]
 

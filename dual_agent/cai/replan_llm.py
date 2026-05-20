@@ -10,6 +10,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_ollama import ChatOllama
 
 from dual_agent.llm_json import coerce_llm_bool, coerce_llm_text, extract_json_object
+from dual_agent.cai.planner_context import post_process_replan_todos
 from dual_agent.cai.schemas import PlanStep, ReplanOutput
 
 
@@ -60,7 +61,15 @@ def invoke_replan(
 
 【call_dai／簡訊審查】若 observation 含 `call_dai` 或摘要前綴 **[DAI]**：請以紀錄中的風險分數、`safety_summary`、主要原因（如 `reason_highlights`、evidence、defense observation 摘要）與建議動作為準整合回答，**不要**自創未出現在紀錄中的法律後果或機關名稱細節。若紀錄已提供風險分數，`final_answer` 應明確寫出「風險分數 XX/100」，並簡短列出 1-3 個主要原因給使用者看。
 
+【絕對禁止捏造審核分數】若 observation_log **不包含** **`call_dai` 的成功執行摘要**（或不含 **[DAI]**、不含任何由 DAI／工具回傳的風險分數紀錄），則 **`final_answer` 不得**書寫「風險分數」「xx/100」「已審查完成」「審核結果為…分」等審級結論；應請使用者貼上完整待審內容或使用送審，或說明目前無法評分。
+
+【已審完成、本輪無 call_dai（請讀 Context【上一輪任務狀態】）】
+- 若工作狀態顯示已審完成且本輪未再跑 DAI：依 `message_source`、分數與摘要**簡短**作答（1–4 句），勿重述整份風險報告。
+- 「我是誰」→ 只答使用者稱呼（【長期記憶】display_name），一句話；勿夾帶助理自我介紹。
+- 「你是誰」→ CAI 行動安全助理；若搞混稱呼可自然區分，勿用考試式糾正語氣。
+
 【人物名稱與關係事實】
+- **「我是誰」與「你是誰」不可混淆**：前者只答使用者稱呼；後者只答助理身份。使用者自稱的名字**不得**當成助理名字（禁止「我是您的智能助理 Alex」）。答「我是誰」時**不要**順便否定「我是某某」——那句只適用於使用者問「你是某某嗎」時。
 - 若 `Context Pack` 已明說人物名稱、關係或稱呼（例如「我叫 Terry」「你現在叫 CAI」「我媽媽叫 mei」），回答此類問題時應**直接引用已知事實**，不要退化成泛稱（例如只說「你的母親」）。
 - 若 `Context Pack` 對同一事實有多個版本，**以較新的「使用者明確更正」為準**；較早輪次的舊稱呼、助理先前自稱或模糊說法，不得覆蓋使用者後來的更正。
 - 只有在 `Context Pack` 中**真的沒有**足夠事實時，才可回答不知道、請使用者補充或再次確認。
@@ -68,7 +77,8 @@ def invoke_replan(
 【review pending】
 - 若 `pending_review=true`：表示系統已判定這是一個審查事件，可能仍在等待待審正文。
 - 在 `pending_review=true` 時，**不得**改排 `search_web`，也**不得**用一般安撫式回答結束任務。
-- 若尚未取得正文：必須追問使用者貼上簡訊／訊息內容。
+- 若尚未取得正文：通常應追問使用者貼上簡訊／訊息內容。
+- 若 **observation 尚無 `call_dai`**，但本輪使用者原句**看似**已貼上摘錄（具體金額、借還款、威脅語等）：**不要**只重複「請貼全文」而無視內容；應 **complete=false**，在 **updated_todos** 第 0 筆排 `call_dai`，`args.artifact`＝本輪原句（除非明顯是閒聊／天氣等新話題）。
 - 若正文已齊備：應維持在審查流程中，交由 `call_dai` / risk_analysis，而不是退回一般聊天。
 
 你的職責：
@@ -82,7 +92,7 @@ def invoke_replan(
 - 若 remaining_todos 含多筆 **語意重複** 的 `search_web`（僅簡繁或標點不同），應視為同一查詢，只保留一筆或改為 **complete=true** 用既有 observation 回答。
 
 【硬性規則】當 remaining_todos 為 **空陣列 []** 且 observation_log 為「（尚無執行結果）」或僅為占位：
-- 若使用者訊息**明文要求網路搜尋／查詢**（含：搜尋、幫我搜、查詢、查查、上網查、上網找、google 等語意）：**不得**僅依 Context Pack 用 final_answer 代替搜尋；必須 **complete=false**，**updated_todos** 第 0 筆為 `search_web` 且 `args.query` 具體可搜（可併用脈絡還原主題名稱），**final_answer** 可為空字串。
+- 若使用者訊息**明文要求網路搜尋／查詢**（含：搜尋、幫我搜、查詢、查查、上網查、上網找、「用 Google 搜」等）：**不得**僅依 Context Pack 用 final_answer 代替搜尋；必須 **complete=false**，**updated_todos** 第 0 筆為 `search_web` 且 `args.query` 具體可搜。**例外**：「打開 Google／開啟 google.com」是**開首頁** → 用 `open_url_readonly`，**禁止** `search_web`；若 observation 已有 **OK** 的 `open_url_readonly` 或 `search_web`（已開啟），必須 **complete=true**、**updated_todos=[]**，勿重複執行。
 - 否則（一般問答／解釋題）：你必須 **complete=true**，在 **final_answer** 直接回答使用者（繁體中文）。
 - 上述「一般問答」情況下 **updated_todos 必須為 []**；禁止為了「查百科」而塞入 search_web / open_url / open_app，除非已符合上一條「明文網搜」。
 
@@ -167,6 +177,12 @@ remaining_todos（JSON）：
         if not isinstance(args, dict):
             args = {}
         updated.append(PlanStep(skill=sk, args={str(k): v for k, v in args.items()}))
+
+    updated = post_process_replan_todos(
+        user_text=user_text,
+        observation_log=observation_log,
+        todos=updated,
+    )
 
     return ReplanOutput(
         complete=complete,

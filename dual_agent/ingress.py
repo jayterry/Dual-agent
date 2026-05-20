@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from dual_agent.cai.review_entry_eligibility import looks_like_declarative_sms_receipt_only
+
 
 class InputOrigin(StrEnum):
     CHAT_BOX = "chat_box"
@@ -446,6 +448,24 @@ def normalize_ingress(
                 safety_relevant=True,
                 message_source=src,
                 entities=extract_entities(split_artifact),
+                metadata=meta,
+            )
+        if looks_like_declarative_sms_receipt_only(raw, entities) and not _looks_like_threat_review_body(
+            raw, entities
+        ):
+            meta["review_pending_candidate"] = True
+            return IngressPayload(
+                raw_input_text=raw,
+                input_origin=origin,
+                input_role=InputRole.INTENT,
+                intent_text=raw,
+                artifact_text="",
+                review_scope=ReviewScope.NONE,
+                detected_task_type=DetectedTaskType.CHECK,
+                requires_dai=False,
+                safety_relevant=True,
+                message_source=src,
+                entities=entities,
                 metadata=meta,
             )
         if _looks_like_threat_review_body(raw, entities):

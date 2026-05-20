@@ -13,6 +13,9 @@ ARGS_SCHEMA: dict[str, Any] = {
 }
 
 _SITE_ALIASES: dict[str, str] = {
+    "google": "https://www.google.com/",
+    "google.com": "https://www.google.com/",
+    "www.google.com": "https://www.google.com/",
     "github": "https://github.com/",
     "github.com": "https://github.com/",
     "youtube": "https://www.youtube.com/",

@@ -259,6 +259,7 @@ def invoke_defense_review_sms_plan(
 輸出鍵名必須與下例一致（skill 僅能為 guard_scan 或 noop）：
 {json_example}
 
+若 Context 含【長期記憶】使用者基本資料，僅供理解稱呼與對話背景；風險分數須依 artifact 與 guard_scan，勿因使用者名稱降低風險評估。
 不可捏造未出現在輸入中的事實。
 """.strip()
     prompt = ChatPromptTemplate.from_messages(

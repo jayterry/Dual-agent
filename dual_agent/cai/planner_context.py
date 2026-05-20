@@ -103,6 +103,27 @@ _SEARCH_TRIGGER: Final[str] = (
     r"查詢我|查詢這|查詢那|查詢「|查詢『|查詢\s*「|查詢\s*『)"
 )
 
+_OPEN_VERB: Final[str] = r"(打開|開啟|開一下|啟動|進入|open|launch)"
+
+# 假設／風險詢問（不是要真的開瀏覽器）
+_HYPOTHETICAL_OPEN_Q: Final[str] = (
+    r"(會怎樣|會不會|如果|假如|萬一|危不危險|安全嗎|有風險嗎|有没有风险|"
+    r"應該點|可以點|能不能點|要不要點|建議.*點|點了會)"
+)
+
+# 指涉「這則簡訊／訊息裡的連結」但句中無具體 http(s)
+_DEICTIC_LINK_REF: Final[str] = (
+    r"(這則|這封|這條|那則|簡訊|訊息|短信).{0,16}(url|網址|連結|鏈接)|"
+    r"(url|網址|連結|鏈接).{0,10}(裡面|里面|其中|當中|中的)"
+)
+
+_KNOWN_OPEN_SITES: Final[tuple[tuple[str, str], ...]] = (
+    (r"google(\.com)?|www\.google\.com|谷歌", "https://www.google.com/"),
+    (r"youtube(\.com)?|youtu\.be", "https://www.youtube.com/"),
+    (r"github(\.com)?", "https://github.com/"),
+    (r"facebook(\.com)?|fb\.com", "https://www.facebook.com/"),
+)
+
 _DEICTIC: Final[str] = r"(我喜歡的|喜歡的遊戲|剛剛那個|前面那則|那一款|那個遊戲|那款遊戲)"
 
 # 從 Context Pack 可抽出的常見實體（可再擴充）
@@ -118,12 +139,69 @@ _KNOWN_GAME_MARKERS: Final[tuple[tuple[str, str], ...]] = (
 )
 
 
+def _is_open_action_command(user_text: str) -> bool:
+    """
+    是否為「請你現在去開」的動作指令。
+    排除：假設問句、指涉簡訊內連結但未給具體 URL 的風險詢問。
+    """
+    t = strip_planner_system_prefix((user_text or "").strip())
+    if re.search(_HYPOTHETICAL_OPEN_Q, t):
+        return False
+    if re.search(_DEICTIC_LINK_REF, t, re.IGNORECASE) and not re.search(
+        r"https?://", t, re.IGNORECASE
+    ):
+        return False
+    return True
+
+
+def open_site_requested(user_text: str) -> bool:
+    """本輪是否要求「開啟網站／分頁」（非關鍵字搜尋）。"""
+    t = strip_planner_system_prefix((user_text or "").strip())
+    if not t:
+        return False
+    if not re.search(_OPEN_VERB, t, re.IGNORECASE):
+        return False
+    if not _is_open_action_command(t):
+        return False
+    if re.search(_SEARCH_TRIGGER, t):
+        return False
+    if re.search(r"(用|以|在).{0,8}(google|谷歌).{0,8}(搜|查|找)", t, re.IGNORECASE):
+        return False
+    if re.search(r"https?://", t, re.IGNORECASE):
+        return True
+    for pattern, _url in _KNOWN_OPEN_SITES:
+        if re.search(pattern, t, re.IGNORECASE):
+            return True
+    if re.search(rf"{_OPEN_VERB}\s*(網址|網站|這個連結|那個網站)", t, re.IGNORECASE):
+        return True
+    return False
+
+
+def resolve_open_url_from_user_text(user_text: str) -> str:
+    """從使用者句還原要開啟的 http(s) URL；無法解析時回傳空字串。"""
+    t = strip_planner_system_prefix((user_text or "").strip())
+    if not t:
+        return ""
+    m = re.search(r"https?://[^\s<>\"']+", t, re.IGNORECASE)
+    if m:
+        return m.group(0).rstrip(".,;)")
+    low = t.lower()
+    for pattern, url in _KNOWN_OPEN_SITES:
+        if re.search(pattern, low, re.IGNORECASE):
+            return url
+    return ""
+
+
 def explicit_web_search_requested(user_text: str) -> bool:
     """本輪是否明確要求上網搜尋／查詢（優先於純記憶回答）。"""
     t = strip_planner_system_prefix((user_text or "").strip())
     if not t:
         return False
-    if re.search(r"(?i)google", t):
+    if open_site_requested(t):
+        return False
+    if re.search(r"(用|以|在)?\s*google\s*(搜|查|找|一下)", t, re.IGNORECASE):
+        return True
+    if re.search(r"(?i)google\s*(搜尋|搜索)", t):
         return True
     if re.search(_SEARCH_TRIGGER, t):
         return True
@@ -197,6 +275,73 @@ def should_force_search_web_todos(user_text: str, todos_skill_names: list[str]) 
     return todos_skill_names[0] != "search_web"
 
 
+def apply_open_site_guard(
+    *,
+    user_text: str,
+    todos: list,
+    task_type: str,
+    task_state: str,
+) -> tuple[list, str, str]:
+    """「打開 Google」等：單一 open_url_readonly，禁止誤排 search_web。"""
+    from dual_agent.cai.schemas import PlanStep
+
+    ut = strip_planner_system_prefix((user_text or "").strip())
+    if not open_site_requested(ut):
+        return todos, task_type, task_state
+
+    url = resolve_open_url_from_user_text(ut)
+    if not url:
+        return todos, task_type, task_state
+
+    return (
+        [PlanStep(skill="open_url_readonly", args={"url": url})],
+        "action",
+        "running",
+    )
+
+
+def _observation_has_tool_ok(observation_log: str | None, skill: str) -> bool:
+    obs = observation_log or ""
+    if not obs.strip() or obs.strip() == "（無）":
+        return False
+    return bool(re.search(rf"{re.escape(skill)}.*\bOK\b|{re.escape(skill)}.*已", obs, re.IGNORECASE | re.DOTALL))
+
+
+def post_process_replan_todos(
+    *,
+    user_text: str,
+    observation_log: str | None,
+    todos: list,
+) -> list:
+    """
+    Replan 後處理：避免「打開 Google」被反覆排成 search_web；已執行過的搜尋勿重複。
+    """
+    from dual_agent.cai.schemas import PlanStep
+
+    ut = strip_planner_system_prefix((user_text or "").strip())
+    obs = observation_log or ""
+
+    if open_site_requested(ut):
+        url = resolve_open_url_from_user_text(ut)
+        if _observation_has_tool_ok(obs, "open_url_readonly"):
+            return []
+        if _observation_has_tool_ok(obs, "search_web"):
+            return []
+        if url:
+            return [PlanStep(skill="open_url_readonly", args={"url": url})]
+        return []
+
+    cleaned = dedupe_search_web_in_plan(collapse_redundant_search_web(list(todos)))
+    if not cleaned:
+        return cleaned
+
+    if _observation_has_tool_ok(obs, "search_web"):
+        if all(getattr(s, "skill", "") == "search_web" for s in cleaned):
+            return []
+
+    return cleaned
+
+
 def apply_explicit_search_guard(
     *,
     user_text: str,
@@ -213,6 +358,8 @@ def apply_explicit_search_guard(
 
     ut = strip_planner_system_prefix((user_text or "").strip())
     names = [getattr(s, "skill", "") for s in todos]
+    if open_site_requested(ut):
+        return todos, task_type, task_state
     if not explicit_web_search_requested(ut):
         return todos, task_type, task_state
 

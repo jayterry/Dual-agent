@@ -4,7 +4,9 @@ import re
 from typing import Any
 
 from dual_agent.dai.invoke import invoke_dai
+from dual_agent.dai.user_db import enrich_dai_payload_with_ueba
 from dual_agent.dai.schemas import DAIRequest, DAIResult, DefenseObservation
+from dual_agent.cai.review_entry_eligibility import artifact_meta_only_for_dai
 from dual_agent.skill_types import SkillContext, SkillResult
 
 ARGS_SCHEMA: dict[str, Any] = {
@@ -55,6 +57,8 @@ def artifact_is_meta_only_intent(artifact: str) -> bool:
     """
     若為「僅宣告收到／要審簡訊」而無可審正文，回 True；Executor 應改走 ask_user，不呼叫 invoke_dai。
     """
+    if artifact_meta_only_for_dai(artifact):
+        return True
     t = _norm_artifact(artifact)
     if not t:
         return True
@@ -167,6 +171,8 @@ def handle(args: dict[str, Any], ctx: SkillContext) -> SkillResult:
     artifact = str(args.get("artifact") or "").strip()
     user_text = str(args.get("user_text") or "").strip()
     context_pack = str(args.get("context_pack") or "").strip()
+    if not context_pack:
+        context_pack = str(ctx.policy_state.get("context_pack") or "").strip()
     sms_review = _boolish(args.get("sms_review"), True)
 
     if not artifact:
@@ -206,7 +212,12 @@ def handle(args: dict[str, Any], ctx: SkillContext) -> SkillResult:
             error=str(e),
         )
 
+    if out.ok:
+        ctx.policy_state.pop("pending_review", None)
+
     payload = _dai_payload(out)
+    review_source = str(ctx.policy_state.get("review_source") or "").strip() or None
+    payload = enrich_dai_payload_with_ueba(payload, text=artifact, source=review_source)
     reasons = list(payload.get("reason_highlights") or [])
     head = (out.safety_summary or "").strip().split("\n", 1)[0][:400]
     score_head = f"風險分數 {out.risk_score}/100"
@@ -220,6 +231,6 @@ def handle(args: dict[str, Any], ctx: SkillContext) -> SkillResult:
         ok=out.ok,
         skill="call_dai",
         summary=summary,
-        data={"dai": payload},
+        data={"dai": payload, "risk_user": payload.get("risk_user")},
         evidence=[f"recommended_cai_action={out.recommended_cai_action}"],
     )

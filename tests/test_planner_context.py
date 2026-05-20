@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from dual_agent.cai.planner_context import (
     apply_explicit_search_guard,
+    apply_open_site_guard,
     build_search_web_query,
     explicit_web_search_requested,
+    open_site_requested,
+    post_process_replan_todos,
 )
 from dual_agent.cai.schemas import PlanStep
 
@@ -74,6 +77,67 @@ def test_online_search_lol() -> None:
     )
     assert todos[0].skill == "search_web"
     assert "英雄聯盟" in str(todos[0].args.get("query", ""))
+
+
+def test_open_google_not_search() -> None:
+    assert open_site_requested("打開google")
+    assert not explicit_web_search_requested("打開google")
+    todos, tt, ts = apply_open_site_guard(
+        user_text="打開google",
+        todos=[],
+        task_type="direct_response",
+        task_state="answering",
+    )
+    assert len(todos) == 1
+    assert todos[0].skill == "open_url_readonly"
+    assert "google.com" in str(todos[0].args.get("url", ""))
+    assert tt == "action"
+    assert ts == "running"
+    todos2, _, _ = apply_explicit_search_guard(
+        user_text="打開google",
+        context_pack="（無）",
+        todos=list(todos),
+        task_type=tt,
+        task_state=ts,
+    )
+    assert todos2[0].skill == "open_url_readonly"
+
+
+def test_google_search_still_detected() -> None:
+    assert explicit_web_search_requested("用google搜天氣")
+    assert not open_site_requested("用google搜天氣")
+
+
+def test_open_sms_url_hypothetical_not_open_site() -> None:
+    q = "打開這則簡訊中的url會怎麼樣嗎"
+    assert not open_site_requested(q)
+    todos, tt, _ = apply_open_site_guard(
+        user_text=q,
+        todos=[],
+        task_type="direct_response",
+        task_state="answering",
+    )
+    assert todos == []
+    assert tt == "direct_response"
+
+
+def test_open_https_hypothetical_not_open_site() -> None:
+    q = "打開 https://evil.example/phish 會怎樣"
+    assert not open_site_requested(q)
+
+
+def test_open_direct_link_still_action() -> None:
+    assert open_site_requested("幫我打開 https://www.google.com")
+
+
+def test_replan_no_repeat_search_after_open_mistake() -> None:
+    obs = "--- 第 1 次執行：search_web ---\nsearch_web OK\n已開啟搜尋：打開google"
+    out = post_process_replan_todos(
+        user_text="打開google",
+        observation_log=obs,
+        todos=[PlanStep(skill="search_web", args={"query": "打開google"})],
+    )
+    assert out == []
 
 
 def test_force_replace_when_llm_wrong_first_skill() -> None:
