@@ -77,30 +77,41 @@ def test_invoke_dai_replan_loop_mock() -> None:
 
 
 def test_invoke_dai_sms_review_mock() -> None:
-    plan = DefensePlan(
-        risk_score=5,
-        risk_labels=["plan"],
-        safety_summary="計畫摘要",
-        evidence=[],
-        tool_restrictions={},
-        recommended_cai_action="continue",  # type: ignore[arg-type]
-        defense_todos=[
-            DefenseStep(skill="noop", args={}),
-            DefenseStep(skill="noop", args={}),
-        ],
-    )
-    with patch("dual_agent.dai.invoke.invoke_defense_review_sms_plan", return_value=plan):
-        with patch("dual_agent.dai.invoke.execute_defense_step") as m_ex:
-            m_ex.side_effect = [
-                DefenseObservation(skill="noop", ok=True, summary="a", data={}),
-                DefenseObservation(skill="noop", ok=True, summary="b", data={}),
-            ]
-            out = invoke_dai(
-                DAIRequest(user_text="請審查簡訊", artifact="測試內容", sms_review=True),
-                model="m",
-                base_url="http://localhost:11434",
-            )
+    fake_report = {
+        "risk_score": 72,
+        "risk_score_total": 72,
+        "r_final_machine": 72,
+        "verdict": "warn",
+        "gate_tier": "warn",
+        "dominant_source": "r_rules",
+        "component_scores": {
+            "r_rules": 25,
+            "r_threat_intel": 0,
+            "r_tls": 0,
+            "r_toxic_fused": 0,
+            "r_llm_optional": 0,
+            "r_ueba": 10,
+        },
+        "evidence": [{"rule_id": "password_credentials", "points": 25}],
+        "reason_highlights": ["硬規則命中"],
+        "track_a": {"tier_scores": {}, "matched_rules": [], "missing_evidence": []},
+        "safety_summary": "計畫摘要",
+        "archive_note": "測試",
+        "labels": ["plan"],
+        "risk_fusion": {"mode": "max_component", "r_final": 72, "risk_total": 72},
+        "semantic": {"skipped": True},
+        "recommended_cai_action": "continue",
+        "risk_user": {"risk_total_user_fused": 72, "delta_user": 0},
+        "risk_score_total_user_fused": 72,
+    }
+    with patch("dual_agent.dai.invoke.run_risk_analysis", return_value=fake_report):
+        out = invoke_dai(
+            DAIRequest(user_text="請審查簡訊", artifact="測試內容", sms_review=True),
+            model="m",
+            base_url="http://localhost:11434",
+        )
     assert out.ok
-    assert out.defense_llm_turns == 1
-    assert len(out.defense_observations) == 2
-    assert m_ex.call_count == 2
+    assert out.risk_score == 72
+    assert out.safety_summary == "計畫摘要"
+    assert len(out.defense_observations) == 1
+    assert out.defense_observations[0].skill == "risk_analysis"

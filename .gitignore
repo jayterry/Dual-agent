@@ -21,3 +21,5 @@ env/
 
 .DS_Store
 Thumbs.db
+
+user_profile_db.json

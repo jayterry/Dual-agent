@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
-from dual_agent.dai.defense_llm import invoke_defense_guard_scan
+from dual_agent.dai.risk_analysis import dai_result_from_risk_report, run_risk_analysis
 
 from dual_agent.dai.schemas import (
     DAIRequest,
@@ -25,7 +25,7 @@ def _step_noop(_args: dict[str, Any], _req: DAIRequest) -> DefenseObservation:
 
 
 def _step_guard_scan(_args: dict[str, Any], req: DAIRequest) -> DefenseObservation:
-    """對 artifact／user_text 跑 Defense 單次結構化審查（invoke_defense_guard_scan）。"""
+    """對 artifact／user_text 跑 risk_analysis 管線（與 sms_review 一致）。"""
     text = (req.artifact or "").strip() or (req.user_text or "").strip()
     if not text:
         return DefenseObservation(
@@ -34,12 +34,17 @@ def _step_guard_scan(_args: dict[str, Any], req: DAIRequest) -> DefenseObservati
             summary="無待審文字",
             data={"error": "empty_input"},
         )
-    report = invoke_defense_guard_scan(text=text)
-    d: dict[str, Any] = json.loads(report.to_json())
-    note = str(d.get("archive_note") or "").strip()
-    sm = str(d.get("sanitized_memory") or "").strip()
-    summary = (note or sm or "guard_scan 完成")[:800]
-    return DefenseObservation(skill="guard_scan", ok=True, summary=summary, data=d)
+    try:
+        report = run_risk_analysis(req, source=req.source or "desktop")
+        summary = str(report.get("safety_summary") or report.get("archive_note") or "risk_analysis 完成")[:800]
+        return DefenseObservation(skill="guard_scan", ok=True, summary=summary, data=report)
+    except Exception as e:  # noqa: BLE001
+        return DefenseObservation(
+            skill="guard_scan",
+            ok=False,
+            summary=f"risk_analysis 失敗：{e}",
+            data={"error": str(e)},
+        )
 
 
 DEFENSE_STEP_REGISTRY: dict[str, Callable[[dict[str, Any], DAIRequest], DefenseObservation]] = {

@@ -19,7 +19,12 @@ class DAIRequest:
     artifact: str = ""
     """可選：待審內容（簡訊全文、fetch_url 摘要、工具輸出等）。"""
     sms_review: bool = False
-    """若 True：走「Defense 先決定 defense_todos → Defense Execute 逐項執行並回報」之簡訊審查流程。"""
+    """若 True：走 risk_analysis 管線（機器分項 + 語意補充），不再用 Defense 計畫 LLM 主評分。"""
+    sender_display: str = ""
+    sender_number: str = ""
+    sender_tech_context: dict[str, Any] = field(default_factory=dict)
+    source: str = ""
+    """UEBA 來源標籤（如 sms_share、desktop）。"""
 
 
 @dataclass

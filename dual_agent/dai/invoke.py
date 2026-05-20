@@ -9,7 +9,8 @@ from dual_agent.dai.defense_execute import (
     execute_defense_step,
     format_defense_observation_block,
 )
-from dual_agent.dai.defense_llm import invoke_defense_replan, invoke_defense_review_sms_plan
+from dual_agent.dai.defense_llm import invoke_defense_replan
+from dual_agent.dai.risk_analysis import dai_result_from_risk_report, run_risk_analysis
 from dual_agent.dai.schemas import DAIRequest, DAIResult, DefenseObservation
 
 
@@ -19,19 +20,25 @@ def _invoke_dai_sms_review(
     model: str | None,
     base_url: str | None,
     temperature: float,
+    source: str | None = None,
 ) -> DAIResult:
-    """
-    簡訊審查固定流程：Defense 單次產出 defense_todos → Defense Execute 逐項執行 → 組裝 DAIResult。
-    """
+    """簡訊審查：機器層 risk_analysis → DAIResult（不再經 Defense 計畫 LLM 主評分）。"""
     m = model if model is not None else OLLAMA_MODEL
     u = base_url if base_url is not None else OLLAMA_BASE_URL
     try:
-        plan = invoke_defense_review_sms_plan(req, model=m, base_url=u, temperature=temperature)
+        report = run_risk_analysis(
+            req,
+            model=m,
+            base_url=u,
+            temperature=temperature,
+            source=source,
+        )
+        return dai_result_from_risk_report(report)
     except Exception as e:  # noqa: BLE001
         return DAIResult(
             ok=False,
             risk_score=0,
-            risk_labels=["plan_error"],
+            risk_labels=["risk_analysis_error"],
             safety_summary="",
             evidence=[],
             tool_restrictions={},
@@ -40,13 +47,6 @@ def _invoke_dai_sms_review(
             defense_llm_turns=0,
             error=str(e),
         )
-    observations: list[DefenseObservation] = []
-    cap = max_defense_iterations()
-    steps = list(plan.defense_todos)[:cap]
-    for st in steps:
-        observations.append(execute_defense_step(st, req))
-    extra_defense_llm = sum(1 for st in steps if (st.skill or "").strip().lower() == "guard_scan")
-    return dai_result_from_sms_review_plan(plan, observations, llm_turns=1 + extra_defense_llm)
 
 
 def invoke_dai(
@@ -62,7 +62,13 @@ def invoke_dai(
     - 否則：Defense ⇄ Execute 多輪（每輪最多一個子任務或 complete）。
     """
     if req.sms_review:
-        return _invoke_dai_sms_review(req, model=model, base_url=base_url, temperature=temperature)
+        return _invoke_dai_sms_review(
+            req,
+            model=model,
+            base_url=base_url,
+            temperature=temperature,
+            source=(req.source or None),
+        )
 
     m = model if model is not None else OLLAMA_MODEL
     u = base_url if base_url is not None else OLLAMA_BASE_URL

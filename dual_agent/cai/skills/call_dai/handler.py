@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from dual_agent.dai.invoke import invoke_dai
+from dual_agent.dai.risk_analysis.reporting import risk_report_to_dai_payload
 from dual_agent.dai.user_db import enrich_dai_payload_with_ueba
 from dual_agent.dai.schemas import DAIRequest, DAIResult, DefenseObservation
 from dual_agent.cai.review_entry_eligibility import artifact_meta_only_for_dai
@@ -196,11 +197,13 @@ def handle(args: dict[str, Any], ctx: SkillContext) -> SkillResult:
             error="artifact_meta_only",
         )
 
+    review_source = str(ctx.policy_state.get("review_source") or "").strip()
     req = DAIRequest(
         user_text=user_text,
         artifact=artifact,
         context_pack=context_pack,
         sms_review=sms_review,
+        source=review_source or "desktop",
     )
     try:
         out = invoke_dai(req)
@@ -215,9 +218,18 @@ def handle(args: dict[str, Any], ctx: SkillContext) -> SkillResult:
     if out.ok:
         ctx.policy_state.pop("pending_review", None)
 
-    payload = _dai_payload(out)
-    review_source = str(ctx.policy_state.get("review_source") or "").strip() or None
-    payload = enrich_dai_payload_with_ueba(payload, text=artifact, source=review_source)
+    if out.defense_observations and isinstance(out.defense_observations[0].data, dict):
+        obs_data = out.defense_observations[0].data
+        if "component_scores" in obs_data:
+            payload = risk_report_to_dai_payload(obs_data)
+        else:
+            payload = _dai_payload(out)
+    else:
+        payload = _dai_payload(out)
+    if not payload.get("risk_user"):
+        payload = enrich_dai_payload_with_ueba(
+            payload, text=artifact, source=review_source or None
+        )
     reasons = list(payload.get("reason_highlights") or [])
     head = (out.safety_summary or "").strip().split("\n", 1)[0][:400]
     score_head = f"風險分數 {out.risk_score}/100"

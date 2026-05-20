@@ -1,62 +1,51 @@
-"""Guard 管線：融合數學與 mock Guard（不依賴 Ollama）。"""
+"""Guard 管線：改為 risk_analysis；mock 不依賴 Ollama。"""
 
 from __future__ import annotations
 
+import os
 from unittest.mock import patch
 
-from dual_agent.dai.defense_llm import GuardExtracted, GuardReport, GuardSignal, _normalize_verdict
 from dual_agent.dai.guard_pipeline import run_guard_analysis_pipeline
 from dual_agent.dai.schemas import DAIRequest
-from dual_agent.dai.toxic_fusion import fuse_risk
 
 
-def test_fuse_risk_default_weights() -> None:
-    f = fuse_risk(r_llm_0_100=80, s_tox_0_100=40)
-    assert f.r_llm_0_100 == 80
-    assert f.s_tox_0_100 == 40
-    assert f.risk_total_0_100 == int(round(0.75 * 80 + 0.25 * 40))
-
-
-def test_normalize_verdict() -> None:
-    assert _normalize_verdict("BLOCK") == "block"
-    assert _normalize_verdict("nope") == "quarantine"
-
-
-def _minimal_guard_report() -> GuardReport:
-    return GuardReport(
-        verdict="allow",
-        risk_score_total=60,
-        injection_score=30,
-        scam_score=40,
-        labels=["test"],
-        signals=[GuardSignal(type="t", severity="low", evidence="e")],
-        extracted=GuardExtracted(),
-        sanitized_memory="摘要",
-        archive_note="結論",
-        model_name="mock",
-    )
-
-
-@patch("dual_agent.dai.guard_pipeline.invoke_defense_guard_scan")
-@patch("dual_agent.dai.guard_pipeline.match_toxic")
-def test_run_guard_analysis_pipeline_order(mock_toxic: object, mock_guard: object) -> None:
-    mock_guard.return_value = _minimal_guard_report()
-    from dual_agent.dai.toxic_fusion import ToxicMatch
-
-    mock_toxic.return_value = ToxicMatch(0.9, "t1", 50, 128, 3)
-
-    with patch.dict(
-        "os.environ",
-        {
-            "TOXIC_DB_PATH": "/no/such/file.json",
-            "TOXIC_CHROMA_PERSIST_DIR": "",
-            "TOXIC_CHROMA_COLLECTION": "",
+def _fake_report() -> dict:
+    return {
+        "risk_score": 60,
+        "risk_score_total": 60,
+        "r_final_machine": 60,
+        "verdict": "allow",
+        "gate_tier": "allow",
+        "dominant_source": "r_rules",
+        "component_scores": {
+            "r_rules": 25,
+            "r_threat_intel": 0,
+            "r_tls": 0,
+            "r_toxic_fused": 0,
+            "r_llm_optional": 0,
+            "r_ueba": 10,
         },
-        clear=False,
-    ):
-        out = run_guard_analysis_pipeline(DAIRequest(user_text="hello", artifact=""))
+        "evidence": [],
+        "reason_highlights": ["test"],
+        "track_a": {"tier_scores": {}, "matched_rules": [], "missing_evidence": []},
+        "safety_summary": "測試",
+        "archive_note": "測試",
+        "labels": [],
+        "risk_fusion": {"mode": "max_component", "r_final": 60, "risk_total": 60},
+        "semantic": {"skipped": True},
+        "pipeline_phases": ["rules"],
+        "recommended_cai_action": "continue",
+        "risk_user": {"risk_total_user_fused": 60, "delta_user": 0},
+        "risk_score_total_user_fused": 60,
+    }
 
-    mock_guard.assert_called_once()
-    assert "risk_fusion" in out
+
+@patch("dual_agent.dai.guard_pipeline.run_risk_analysis")
+def test_run_guard_analysis_pipeline_delegates(mock_run: object) -> None:
+    mock_run.return_value = _fake_report()
+    with patch.dict(os.environ, {"DAI_SEMANTIC_LLM": "0"}, clear=False):
+        out = run_guard_analysis_pipeline(DAIRequest(user_text="hello", artifact=""))
+    mock_run.assert_called_once()
+    assert out["risk_score"] == 60
+    assert out["component_scores"]["r_rules"] == 25
     assert out["gate_tier"] in ("allow", "warn", "block")
-    assert out["pipeline_phases"][0] == "defense_guard_scan"

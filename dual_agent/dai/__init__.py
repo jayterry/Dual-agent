@@ -1,6 +1,7 @@
 """DAI（Defense Agent Intelligence）：唯一 LLM 為 Defense；含單次審查、多輪派工迴圈與固定順序管線。"""
 
 from dual_agent.dai.guard_pipeline import run_guard_analysis_pipeline
+from dual_agent.dai.risk_analysis import run_risk_analysis
 from dual_agent.dai.defense_llm import GuardReport, invoke_defense_guard_scan, run_guard_universal
 from dual_agent.dai.invoke import invoke_dai
 from dual_agent.dai.schemas import (
@@ -15,6 +16,7 @@ from dual_agent.dai.schemas import (
 __all__ = [
     "invoke_dai",
     "run_guard_analysis_pipeline",
+    "run_risk_analysis",
     "invoke_defense_guard_scan",
     "run_guard_universal",
     "GuardReport",
