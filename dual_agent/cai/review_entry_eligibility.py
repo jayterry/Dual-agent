@@ -13,12 +13,31 @@ if TYPE_CHECKING:
     from dual_agent.ingress import IngressEntities
 
 
-# 句式：可有可無主語「我／剛」＋收到＋可有量詞＋至多 N 個漢字插入（情緒／形容）＋簡訊|訊息
+# 句式：可有可無主語「我／剛」＋收到＋可有量詞＋插入形容＋簡訊|訊息|通知＋可選句尾情緒
 _SMS_RECEIPT_ONLY_RE = re.compile(
-    r"^(我(剛|剛才)?)?收到(了)?(一封|一通|一則|一條|一個)?([\u4e00-\u9fff]{0,14})(簡訊|訊息)\s*[。．.!！？…]*\s*$",
+    r"^(我(剛|剛才)?)?收到(了)?(一封|一通|一則|一條|一個)?([\u4e00-\u9fff]{0,14})(簡訊|訊息)\s*[。．.!！？…,，\s]*([\u4e00-\u9fff]{0,12})?\s*$",
     re.UNICODE,
 )
-_MAX_META_DECLARATION_LEN = 48
+_SMS_RECEIPT_MOOD_RE = re.compile(
+    r"^(我(剛|剛才)?)?(有人)?(傳|發)?(給我)?收到(了)?(一封|一通|一則|一條|一個)?"
+    r"([\u4e00-\u9fff]{0,10})?(可疑|奇怪|怪怪|詭異)?(的)?(簡訊|訊息|通知)"
+    r"([，,]?\s*[\u4e00-\u9fff]{0,14}(怪|奇怪|可疑|詭異|威脅))?\s*[。．.!！？…,，]*\s*$",
+    re.UNICODE,
+)
+_REVIEW_INTENT_PHRASE_RE = re.compile(
+    r"(簡訊|訊息|通知).{0,8}(怪|奇怪|可疑|詭異)|"
+    r"有人(傳|發).{0,6}(簡訊|訊息)|"
+    r"收到.{0,6}(可疑|奇怪).{0,4}(簡訊|訊息)|"
+    r"你可以幫我(看看|看)嗎|"
+    r"幫我看看這是不是詐騙|"
+    r"幫我看(一下)?(這)?是不是詐騙",
+    re.UNICODE,
+)
+_REVIEW_INTENT_ONLY_RE = re.compile(
+    r"(幫我看|幫我看看|檢查|審查|審核|是不是詐騙|是否詐騙|查詐騙|可疑|有點怪)",
+    re.IGNORECASE,
+)
+_MAX_META_DECLARATION_LEN = 64
 _REVIEW_BLOCK = "【待審內容】"
 
 
@@ -31,7 +50,6 @@ def has_substantive_review_signals(raw: str, entities: IngressEntities) -> bool:
         return False
     if _REVIEW_BLOCK in t:
         return True
-    # 拆段：審査意圖 + 正文
     for sep in ("：", ":"):
         if sep not in t:
             continue
@@ -47,7 +65,6 @@ def has_substantive_review_signals(raw: str, entities: IngressEntities) -> bool:
 
         if _REVIEW_INTENT_RE.search(lines[0]):
             return True
-    # 長文：不太可能是單句「收到簡訊」宣告
     if len(t) > _MAX_META_DECLARATION_LEN:
         return True
     if entities.urls:
@@ -86,7 +103,51 @@ def looks_like_declarative_sms_receipt_only(raw: str, entities: IngressEntities)
         return False
     if has_substantive_review_signals(t, entities):
         return False
-    return bool(_SMS_RECEIPT_ONLY_RE.match("".join(t.split())))
+    compact = "".join(t.split())
+    if _SMS_RECEIPT_ONLY_RE.match(compact) or _SMS_RECEIPT_MOOD_RE.match(compact):
+        return True
+    if _REVIEW_INTENT_PHRASE_RE.search(compact):
+        return True
+    return False
+
+
+def _looks_like_pure_review_intent_no_body(raw: str) -> bool:
+    t = (raw or "").strip()
+    if not t or len(t) > 48:
+        return False
+    if ":" in t or "：" in t:
+        return False
+    if "\n" in t:
+        return False
+    if re.search(r"https?://", t, re.I):
+        return False
+    return bool(_REVIEW_INTENT_ONLY_RE.search(t))
+
+
+def looks_like_review_intent_without_artifact(raw: str, entities: IngressEntities) -> bool:
+    """
+    審查意圖但尚無可審 artifact（應 review_pending_candidate，不可 call_dai）。
+    """
+    t = (raw or "").strip()
+    if not t or has_substantive_review_signals(t, entities):
+        return False
+    if looks_like_declarative_sms_receipt_only(t, entities):
+        return True
+    if _looks_like_pure_review_intent_no_body(t):
+        return True
+    from dual_agent.ingress import extract_entities
+
+    ents = entities if entities is not None else extract_entities(t)
+    from dual_agent.ingress import (
+        _looks_like_review_help_request,
+        _looks_like_threat_review_body,
+    )
+
+    if _looks_like_threat_review_body(t, ents):
+        return False
+    if _looks_like_review_help_request(t, ents):
+        return True
+    return False
 
 
 def artifact_meta_only_for_dai(artifact_text: str) -> bool:
@@ -101,6 +162,6 @@ def artifact_meta_only_for_dai(artifact_text: str) -> bool:
     ents = extract_entities(t)
     if has_substantive_review_signals(t, ents):
         return False
-    if looks_like_declarative_sms_receipt_only(t, ents):
+    if looks_like_review_intent_without_artifact(t, ents):
         return True
     return False

@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from dual_agent.dai.defense_execute import execute_defense_step, run_defense_execute_legacy
 from dual_agent.dai.invoke import invoke_dai
+from dual_agent.dai.pipeline_context import SMS_REVIEW_DAG
 from dual_agent.dai.schemas import DAIRequest, DefenseObservation, DefensePlan, DefenseReplanOutput, DefenseStep
 
 
@@ -98,20 +99,36 @@ def test_invoke_dai_sms_review_mock() -> None:
         "safety_summary": "計畫摘要",
         "archive_note": "測試",
         "labels": ["plan"],
-        "risk_fusion": {"mode": "max_component", "r_final": 72, "risk_total": 72},
+        "risk_fusion": {"mode": "machine_support_bonus_weighted", "r_final": 72, "risk_total": 72},
         "semantic": {"skipped": True},
         "recommended_cai_action": "continue",
-        "risk_user": {"risk_total_user_fused": 72, "delta_user": 0},
         "risk_score_total_user_fused": 72,
     }
-    with patch("dual_agent.dai.invoke.run_risk_analysis", return_value=fake_report):
-        out = invoke_dai(
-            DAIRequest(user_text="請審查簡訊", artifact="測試內容", sms_review=True),
-            model="m",
-            base_url="http://localhost:11434",
-        )
+    fake_plan = DefensePlan(
+        risk_score=0,
+        risk_labels=[],
+        safety_summary="計畫摘要",
+        evidence=[],
+        tool_restrictions={},
+        recommended_cai_action="continue",
+        defense_todos=[DefenseStep(skill="guard_scan", args={})],
+    )
+    fake_obs = [
+        DefenseObservation(skill=n, ok=True, summary="ok", data={})
+        for n in SMS_REVIEW_DAG
+    ]
+    with patch("dual_agent.dai.invoke.invoke_defense_review_sms_plan", return_value=fake_plan):
+        with patch(
+            "dual_agent.dai.executor.run_sms_review_dag",
+            return_value=(fake_report, fake_obs),
+        ):
+            out = invoke_dai(
+                DAIRequest(user_text="請審查簡訊", artifact="測試內容", sms_review=True),
+                model="m",
+                base_url="http://localhost:11434",
+            )
     assert out.ok
     assert out.risk_score == 72
     assert out.safety_summary == "計畫摘要"
-    assert len(out.defense_observations) == 1
-    assert out.defense_observations[0].skill == "risk_analysis"
+    assert out.defense_llm_turns >= 1
+    assert len(out.defense_observations) == len(SMS_REVIEW_DAG)

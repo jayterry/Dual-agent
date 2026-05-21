@@ -43,6 +43,16 @@ def max_defense_iterations() -> int:
     return max(1, min(32, n))
 
 
+def dai_risk_llm_weight() -> float:
+    """DAI 風險融合：語意層（R-LLM）權重，其餘為機器層（硬規則／情資／TLS／毒樣）。"""
+    raw = _env("DAI_R_LLM_WEIGHT", "0.35")
+    try:
+        w = float(raw)
+    except ValueError:
+        return 0.35
+    return max(0.0, min(1.0, w))
+
+
 def context_buffer_max_rounds() -> int:
     """Memory / Context Layer：最近對話緩衝最多保留幾輪；超過則壓入 rolling_summary。"""
     raw = _env("CONTEXT_BUFFER_MAX_ROUNDS", "10")

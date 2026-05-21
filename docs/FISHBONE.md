@@ -41,7 +41,7 @@
 
 | 子項 | 說明 |
 |------|------|
-| **可稽核評分** | 分項計分（`r_rules`、`r_threat_intel`、`r_tls`、`r_toxic_fused`、`r_llm_optional`），`r_final = max(...)`，每項需有證據或 `missing_evidence` |
+| **可稽核評分** | 分項計分 + **融合 v2**（machine 支援加成、LLM 35%、semantic_labels 下限），`risk_fusion.mode = machine_support_bonus_weighted` |
 | **台灣化威脅模型** | 對齊 Track A：支付 App、身分證、詐騙話術框架、Tier 護欄 |
 | **LLM 非老大** | 語意層只補 H/I 與人話；無 Threat Intel／TLS／Sender 資料則不加分、不捏造 |
 | **任務導向 CAI** | 非閒聊機器人；Planner + Replan，Ingress 區分審查／搜尋／direct_response |
@@ -55,7 +55,7 @@
 | 子項 | 狀態 | 說明 |
 |------|------|------|
 | **DAI risk_analysis 管線** | 已實作 | `dual_agent/dai/risk_analysis/`，`guard_pipeline` 委派 |
-| **簡訊送審路徑** | 已切換 | `invoke_dai(sms_review)` → `run_risk_analysis` |
+| **簡訊送審路徑** | 已切換 | `invoke_dai(sms_review)` → Defense LLM 計畫 → DAI Executor DAG（7 skills） |
 | **結構化 breakdown** | 已輸出 | `component_scores`、`track_a`、`verdict`、`dominant_source` |
 | **Review Entry / pending** | 已上線 | 宣告收到簡訊 → ask_user；補正文 → 可 `call_dai` |
 | **手機 API** | 可跑 | `mobile_server.py` + Android smsagent |
@@ -88,9 +88,10 @@
 
 | 功能 | 用途 |
 |------|------|
-| `run_risk_analysis` | 主評分管線（機器層 + 語意 + UEBA） |
-| `run_guard_pipeline` | 同上（向後相容別名） |
-| `run_guard_pipeline`（skill） | 獨立呼叫完整報告 |
+| `build_analysis_payload` … `fuse_risk_and_ueba` | DAI 固定 DAG（7 skills） |
+| `run_risk_analysis` | 薄包裝，委派 DAG |
+| `run_guard_pipeline`（skill） | 已廢止入口，改呼叫 `run_risk_analysis` |
+| `guard_scan`（Defense 步驟） | 已廢止，改跑完整 DAG |
 | UEBA `user_db` | 來源／信任網域、`risk_user` |
 | Toxic DB / Chroma | `r_toxic_fused` |
 

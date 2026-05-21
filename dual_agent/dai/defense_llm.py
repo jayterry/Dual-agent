@@ -228,7 +228,8 @@ def invoke_defense_review_sms_plan(
 ) -> DefensePlan:
     """
     簡訊審查：Defense **單次**產出 `defense_todos`（之後由 Defense Execute 逐項跑完）。
-    僅允許 skill：guard_scan、noop。
+    建議 defense_todos 含 guard_scan（將執行完整 DAG）；亦允許 noop。
+    實際評分由 DAI Executor 固定 DAG（build_analysis_payload → fuse_risk_and_ueba）執行。
     """
     llm = ChatOllama(model=model, base_url=base_url, temperature=temperature, format="json")
     max_t = max_defense_iterations()

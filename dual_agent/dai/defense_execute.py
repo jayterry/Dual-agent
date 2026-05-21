@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
-from dual_agent.dai.risk_analysis import dai_result_from_risk_report, run_risk_analysis
-
 from dual_agent.dai.schemas import (
     DAIRequest,
     DAIResult,
@@ -25,25 +23,33 @@ def _step_noop(_args: dict[str, Any], _req: DAIRequest) -> DefenseObservation:
 
 
 def _step_guard_scan(_args: dict[str, Any], req: DAIRequest) -> DefenseObservation:
-    """對 artifact／user_text 跑 risk_analysis 管線（與 sms_review 一致）。"""
+    """已廢止：改跑 SMS 審查 DAG（與 invoke_dai sms_review 一致）。"""
     text = (req.artifact or "").strip() or (req.user_text or "").strip()
     if not text:
         return DefenseObservation(
             skill="guard_scan",
             ok=False,
             summary="無待審文字",
-            data={"error": "empty_input"},
+            data={"error": "empty_input", "deprecated": True},
         )
     try:
-        report = run_risk_analysis(req, source=req.source or "desktop")
-        summary = str(report.get("safety_summary") or report.get("archive_note") or "risk_analysis 完成")[:800]
-        return DefenseObservation(skill="guard_scan", ok=True, summary=summary, data=report)
+        from dual_agent.dai.executor import build_pipeline_context, run_sms_review_dag
+
+        pipe = build_pipeline_context(req, source=req.source or "desktop")
+        report, _trace = run_sms_review_dag(pipe)
+        summary = str(report.get("safety_summary") or report.get("archive_note") or "DAG 完成")[:800]
+        return DefenseObservation(
+            skill="guard_scan",
+            ok=True,
+            summary=summary,
+            data={**report, "deprecated_guard_scan": True},
+        )
     except Exception as e:  # noqa: BLE001
         return DefenseObservation(
             skill="guard_scan",
             ok=False,
-            summary=f"risk_analysis 失敗：{e}",
-            data={"error": str(e)},
+            summary=f"DAG 失敗：{e}",
+            data={"error": str(e), "deprecated": True},
         )
 
 

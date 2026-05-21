@@ -1,16 +1,15 @@
-"""DAI 公開入口：簡訊審查（Defense 產 todos → Execute）或 Defense ⇄ Execute 多輪迴圈。"""
+"""DAI 公開入口：簡訊審查（Defense 產 todos → DAI Executor DAG）或 Defense ⇄ Execute 多輪迴圈。"""
 
 from __future__ import annotations
 
 from dual_agent.config import OLLAMA_BASE_URL, OLLAMA_MODEL, max_defense_iterations
 from dual_agent.dai.defense_execute import (
     dai_result_from_replan_final,
-    dai_result_from_sms_review_plan,
     execute_defense_step,
     format_defense_observation_block,
 )
-from dual_agent.dai.defense_llm import invoke_defense_replan
-from dual_agent.dai.risk_analysis import dai_result_from_risk_report, run_risk_analysis
+from dual_agent.dai.defense_llm import invoke_defense_replan, invoke_defense_review_sms_plan
+from dual_agent.dai.risk_analysis.reporting import dai_result_from_sms_defense
 from dual_agent.dai.schemas import DAIRequest, DAIResult, DefenseObservation
 
 
@@ -22,18 +21,36 @@ def _invoke_dai_sms_review(
     temperature: float,
     source: str | None = None,
 ) -> DAIResult:
-    """簡訊審查：機器層 risk_analysis → DAIResult（不再經 Defense 計畫 LLM 主評分）。"""
+    """簡訊審查：Defense LLM 規劃 → 固定 DAG（dai/skills）→ DAIResult。"""
     m = model if model is not None else OLLAMA_MODEL
     u = base_url if base_url is not None else OLLAMA_BASE_URL
+    src = (source or req.source or "desktop").strip() or "desktop"
     try:
-        report = run_risk_analysis(
-            req,
-            model=m,
-            base_url=u,
-            temperature=temperature,
-            source=source,
+        from dual_agent.dai.executor import build_pipeline_context, run_sms_review_dag
+
+        plan = invoke_defense_review_sms_plan(
+            req, model=m, base_url=u, temperature=temperature
         )
-        return dai_result_from_risk_report(report)
+        pipe = build_pipeline_context(
+            req, model=m, base_url=u, temperature=temperature, source=src
+        )
+        report, observations = run_sms_review_dag(pipe)
+        if not report:
+            return DAIResult(
+                ok=False,
+                risk_score=0,
+                risk_labels=["dag_empty"],
+                safety_summary="",
+                evidence=[],
+                tool_restrictions={},
+                recommended_cai_action="ask_user",
+                defense_observations=observations,
+                defense_llm_turns=1,
+                error="sms_review_dag 未產出報告",
+            )
+        return dai_result_from_sms_defense(
+            plan, report, observations, llm_turns=1
+        )
     except Exception as e:  # noqa: BLE001
         return DAIResult(
             ok=False,
@@ -58,7 +75,7 @@ def invoke_dai(
 ) -> DAIResult:
     """
     DAI：
-    - `sms_review=True`：Defense 先決定 `defense_todos`，再由 Execute 整批執行並回報。
+    - `sms_review=True`：Defense 先決定計畫，再由 DAI Executor 跑固定 DAG。
     - 否則：Defense ⇄ Execute 多輪（每輪最多一個子任務或 complete）。
     """
     if req.sms_review:

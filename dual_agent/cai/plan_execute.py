@@ -11,14 +11,20 @@ User（+ 上下文占位）→ Planner LLM →
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from dual_agent.config import OLLAMA_BASE_URL, OLLAMA_MODEL, max_executor_steps, max_replan_iterations
 from dual_agent.cai.executor import execute_step, format_results_for_display
+from dual_agent.cai.context_layer import normalize_user_facts
+from dual_agent.cai.follow_up_direct import is_pure_identity_turn, try_follow_up_direct_answer
+from dual_agent.cai.memory_direct import try_handle_memory_turn
 from dual_agent.cai.planner_llm import invoke_planner
 from dual_agent.cai.planner_validate import validate_planner_output
 from dual_agent.cai.replan_llm import invoke_replan
 from dual_agent.cai.schemas import PlanExecuteOutcome, PlanStep, ReplanOutput
+from dual_agent.cai.review_entry_eligibility import looks_like_review_intent_without_artifact
+from dual_agent.cai.skills.call_dai.handler import artifact_is_meta_only_intent
 from dual_agent.ingress import (
     DetectedTaskType,
     IngressPayload,
@@ -29,13 +35,10 @@ from dual_agent.ingress import (
     normalize_ingress,
 )
 from dual_agent.skill_types import SkillContext, SkillResult
-from dual_agent.skills_registry import get_tool_catalog, parse_inline_skill_calls, strip_inline_skill_calls
+from dual_agent.skills_registry import get_tool_catalog_cai, parse_inline_skill_calls, strip_inline_skill_calls
 
-_REVIEW_ASK_USER_QUESTION = "請貼上完整簡訊或訊息內容，我才能幫您審查風險。"
-_REVIEW_ASK_USER_ANSWER = (
-    "請貼上完整簡訊或訊息內容，我才能幫您進一步審查。"
-    "若您本人或家人有立即危險，請先聯絡警方或當地緊急單位。"
-)
+_REVIEW_ASK_USER_QUESTION = "請貼上完整簡訊內容，我才能幫你審查風險。"
+_REVIEW_ASK_USER_ANSWER = "請貼上完整簡訊內容，我才能幫你審查風險。"
 
 
 def _out_plan(initial: list[PlanStep], executed: list[PlanStep]) -> list[PlanStep]:
@@ -113,6 +116,42 @@ def _clear_pending_review(ctx: SkillContext) -> None:
     ctx.policy_state.pop("pending_review", None)
 
 
+def _ingress_has_review_artifact(ingress: IngressPayload) -> bool:
+    return bool((ingress.artifact_text or "").strip())
+
+
+def _should_direct_review_ask_user(ingress: IngressPayload) -> bool:
+    """審查意圖但尚無 artifact：短路 ask_user，不進 Planner / call_dai。"""
+    if _ingress_has_review_artifact(ingress):
+        return False
+    if ingress.requires_dai:
+        return False
+    meta = ingress.metadata or {}
+    review_pending = bool(meta.get("review_pending_candidate"))
+    itt = str(ingress.detected_task_type or "").strip().lower()
+    if itt == "check" or review_pending:
+        return True
+    raw = (ingress.raw_input_text or "").strip()
+    if raw and looks_like_review_intent_without_artifact(raw, ingress.entities):
+        return True
+    return False
+
+
+def _call_dai_blocked_without_artifact(st: PlanStep, ctx: SkillContext) -> bool:
+    """僅在 ingress 或步驟已有非 meta 正文時才允許 call_dai。"""
+    if st.skill != "call_dai":
+        return False
+    ingress_dict = ctx.policy_state.get("ingress_payload") or {}
+    if str(ingress_dict.get("artifact_text") or "").strip():
+        return False
+    if ingress_dict.get("requires_dai") is True:
+        return False
+    step_art = str((st.args or {}).get("artifact") or "").strip()
+    if not step_art:
+        return True
+    return artifact_is_meta_only_intent(step_art)
+
+
 def _direct_review_ask_user(ctx: SkillContext, ingress: IngressPayload) -> PlanExecuteOutcome:
     _set_pending_review(ctx, ingress)
     step = _review_ask_user_step()
@@ -160,6 +199,177 @@ def _direct_review_call_dai_plan(ingress: IngressPayload, context_pack: str | No
         },
     )
     return [step], "check", "running"
+
+
+_STOPPED_REPLAN_MSG = "（已停止：待辦已空但 Replan 未標記完成。）"
+
+
+def _format_answer_from_dai(dai: dict[str, Any]) -> str:
+    """由 call_dai 結果組繁中總結（Replan 未 complete 時的 deterministic 收尾）。"""
+    display = str(dai.get("display_text") or "").strip()
+    if display:
+        return display
+    lines: list[str] = []
+    score = dai.get("risk_score")
+    if isinstance(score, (int, float)):
+        lines.append(f"風險分數 {int(score)}/100。")
+    action = str(dai.get("recommended_cai_action") or "").strip()
+    if action:
+        action_zh = {"block": "阻擋", "ask_user": "請您提高警覺並勿輕信", "continue": "可繼續留意"}.get(
+            action, action
+        )
+        lines.append(f"建議：{action_zh}。")
+    summary = str(dai.get("safety_summary") or "").strip()
+    if summary:
+        lines.append(summary[:400])
+    reasons = dai.get("reason_highlights") or []
+    if isinstance(reasons, list):
+        picked = [str(x).strip()[:160] for x in reasons if str(x).strip()][:3]
+        if picked:
+            lines.append("主要原因：")
+            lines.extend(f"• {x}" for x in picked)
+    return "\n".join(lines).strip() or "已完成風險審查。"
+
+
+def _try_direct_follow_up_answer(
+    user_text: str,
+    ctx: SkillContext,
+    *,
+    context_pack: str | None,
+) -> str | None:
+    """身份／送審後追問等確定性回答（優先於 Planner/Replan）。"""
+    profile = ctx.policy_state.get("user_profile")
+    if not isinstance(profile, dict):
+        profile = None
+    return try_follow_up_direct_answer(
+        user_text,
+        context_pack=context_pack,
+        user_profile=profile,
+        task_snapshot=_task_snapshot_from_ctx(ctx),
+        review_work_state=ctx.policy_state.get("review_work_state"),
+    )
+
+
+def _outcome_from_direct_answer(
+    answer: str,
+    *,
+    task_type: str = "direct_response",
+    task_state: str = "completed",
+) -> PlanExecuteOutcome:
+    return PlanExecuteOutcome(
+        plan=[],
+        results=[],
+        answer=answer,
+        task_type=task_type,
+        task_state=task_state,
+    )
+
+
+def _handle_call_dai_meta_only_failure(
+    r: SkillResult,
+    ctx: SkillContext,
+    ingress: IngressPayload,
+    *,
+    initial_plan: list[PlanStep],
+    executed_trace: list[PlanStep],
+    results: list[SkillResult],
+) -> PlanExecuteOutcome | None:
+    if r.skill != "call_dai" or r.ok or r.error != "artifact_meta_only":
+        return None
+    _set_pending_review(ctx, ingress)
+    ctx.policy_state["pending_task"] = {
+        "type": "ask_user",
+        "question": _REVIEW_ASK_USER_QUESTION,
+    }
+    clean_results = [
+        SkillResult(
+            ok=False,
+            skill="call_dai",
+            summary=r.summary or "尚無可審正文",
+            error="artifact_meta_only",
+            data={},
+        )
+    ]
+    return PlanExecuteOutcome(
+        plan=_out_plan(initial_plan, executed_trace),
+        results=clean_results,
+        answer=_REVIEW_ASK_USER_ANSWER,
+        task_type="check",
+        task_state="waiting_input",
+    )
+
+
+def _try_deterministic_replan_finish(
+    results: list[SkillResult],
+    *,
+    observation_log: str | None = None,
+) -> str | None:
+    """call_dai 或 open_url 已成功但 Replan 未收尾時，產生確定性回答。"""
+    for r in reversed(results):
+        if not r.ok:
+            continue
+        if r.skill == "call_dai":
+            data = r.data or {}
+            dai = data.get("dai")
+            if isinstance(dai, dict):
+                return _format_answer_from_dai(dai)
+        if r.skill == "open_url_readonly":
+            url = ""
+            if isinstance(r.data, dict):
+                url = str(r.data.get("url") or "").strip()
+            if not url and observation_log:
+                m = re.search(
+                    r"open_url_readonly.*?(https?://\S+)",
+                    observation_log,
+                    re.IGNORECASE,
+                )
+                if m:
+                    url = m.group(1).rstrip(".,;)")
+            summary = (r.summary or "").strip()
+            if summary:
+                return summary
+            if url:
+                return f"已在瀏覽器嘗試開啟：{url}"
+            return "已在瀏覽器嘗試開啟網頁。"
+    return None
+
+
+def _outcome_with_deterministic_answer(
+    *,
+    initial_plan: list[PlanStep],
+    executed_trace: list[PlanStep],
+    results: list[SkillResult],
+    answer: str,
+    task_type: str,
+    task_state: str,
+    observation_log: str | None = None,
+) -> PlanExecuteOutcome:
+    """若 answer 為 Replan 卡住訊息，改以工具結果組回答。"""
+    fa = (answer or "").strip()
+    if fa and _STOPPED_REPLAN_MSG not in fa and "Replan 未產生總結" not in fa:
+        return PlanExecuteOutcome(
+            plan=_out_plan(initial_plan, executed_trace),
+            results=results,
+            answer=fa,
+            task_type=task_type,
+            task_state=task_state,
+        )
+    det = _try_deterministic_replan_finish(results, observation_log=observation_log)
+    if det:
+        return PlanExecuteOutcome(
+            plan=_out_plan(initial_plan, executed_trace),
+            results=results,
+            answer=det,
+            task_type=task_type,
+            task_state="completed" if task_state in ("running", "new") else task_state,
+        )
+    return PlanExecuteOutcome(
+        plan=_out_plan(initial_plan, executed_trace),
+        results=results,
+        answer=fa or _STOPPED_REPLAN_MSG,
+        task_type=task_type,
+        task_state=task_state,
+    )
 
 
 def _run_replan_loop(
@@ -229,6 +439,15 @@ def _run_replan_loop(
                         task_type=task_type,
                         task_state=ro.task_state,
                     )
+                det = _try_deterministic_replan_finish(results, observation_log=observation_log)
+                if det:
+                    return PlanExecuteOutcome(
+                        plan=_out_plan(initial_plan, executed_trace),
+                        results=results,
+                        answer=det,
+                        task_type=task_type,
+                        task_state="completed",
+                    )
                 return PlanExecuteOutcome(
                     plan=_out_plan(initial_plan, executed_trace),
                     results=results,
@@ -240,8 +459,55 @@ def _run_replan_loop(
 
             st = todos[0]
             executed_trace.append(PlanStep(skill=st.skill, args=dict(st.args)))
+            if _call_dai_blocked_without_artifact(st, ctx):
+                ingress_dict = ctx.policy_state.get("ingress_payload") or {}
+                ingress_obj = normalize_ingress(
+                    raw_input_text=str(ingress_dict.get("raw_input_text") or normalized_turn),
+                    input_origin=str(ingress_dict.get("input_origin") or "chat_box"),
+                    metadata=dict(ingress_dict.get("metadata") or {}),
+                )
+                r = SkillResult(
+                    ok=False,
+                    skill="call_dai",
+                    summary="尚未取得可審查的簡訊正文",
+                    error="artifact_meta_only",
+                    data={},
+                )
+                results.append(r)
+                meta_out = _handle_call_dai_meta_only_failure(
+                    r,
+                    ctx,
+                    ingress_obj,
+                    initial_plan=initial_plan,
+                    executed_trace=executed_trace,
+                    results=results,
+                )
+                if meta_out is not None:
+                    return meta_out
+                observation_lines.append(
+                    f"--- 第 {len(observation_lines) + 1} 次執行：{st.skill} ---\n"
+                    + format_results_for_display([r])
+                )
+                observation_log = "\n\n".join(observation_lines)
+                todos = todos[1:]
+                continue
             r = execute_step(st, ctx)
             results.append(r)
+            ingress_dict = ctx.policy_state.get("ingress_payload") or {}
+            ingress_obj = normalize_ingress(
+                raw_input_text=str(ingress_dict.get("raw_input_text") or normalized_turn),
+                input_origin=str(ingress_dict.get("input_origin") or "chat_box"),
+            )
+            meta_out = _handle_call_dai_meta_only_failure(
+                r,
+                ctx,
+                ingress_obj,
+                initial_plan=initial_plan,
+                executed_trace=executed_trace,
+                results=results,
+            )
+            if meta_out is not None:
+                return meta_out
             observation_lines.append(
                 f"--- 第 {len(observation_lines) + 1} 次執行：{st.skill} ---\n"
                 + format_results_for_display([r])
@@ -299,24 +565,29 @@ def _run_replan_loop(
                     task_type=task_type,
                     task_state=ro.task_state,
                 )
-            return PlanExecuteOutcome(
-                plan=_out_plan(initial_plan, executed_trace),
+            return _outcome_with_deterministic_answer(
+                initial_plan=initial_plan,
+                executed_trace=executed_trace,
                 results=results,
-                answer="（已停止：待辦已空但 Replan 未標記完成。）",
+                answer=_STOPPED_REPLAN_MSG,
                 task_type=task_type,
                 task_state=ro.task_state,
+                observation_log=observation_log,
             )
 
-    return PlanExecuteOutcome(
-        plan=_out_plan(initial_plan, executed_trace),
+    last_fa = (
+        (last_ro.final_answer or "").strip()
+        if last_ro and (last_ro.final_answer or "").strip()
+        else "（已達 MAX_REPLAN_ITERATIONS，已停止。）"
+    )
+    return _outcome_with_deterministic_answer(
+        initial_plan=initial_plan,
+        executed_trace=executed_trace,
         results=results,
-        answer=(
-            (last_ro.final_answer or "").strip()
-            if last_ro and (last_ro.final_answer or "").strip()
-            else "（已達 MAX_REPLAN_ITERATIONS，已停止。）"
-        ),
+        answer=last_fa,
         task_type=task_type,
         task_state=task_state,
+        observation_log=observation_log,
     )
 
 
@@ -429,8 +700,32 @@ def run_plan_and_execute(
     ctx.policy_state["ingress_payload"] = ingress_payload_to_dict(ingress)
 
     snap = _task_snapshot_from_ctx(ctx) or {}
-    payload = _planner_payload(user_text, ctx)
     normalized_turn = _planner_source_turn_text(user_text, ingress)
+
+    if _should_direct_review_ask_user(ingress):
+        return _direct_review_ask_user(ctx, ingress)
+
+    user_facts = normalize_user_facts(
+        ctx.policy_state.get("user_facts") if isinstance(ctx.policy_state.get("user_facts"), dict) else None
+    )
+    mem_out = try_handle_memory_turn(
+        normalized_turn,
+        ctx=ctx,
+        user_facts=user_facts,
+        model=model,
+        base_url=base_url,
+        temperature=temperature,
+    )
+    if mem_out is not None:
+        ctx.policy_state.pop("pending_review", None)
+        return mem_out
+
+    if is_pure_identity_turn(normalized_turn):
+        direct = _try_direct_follow_up_answer(normalized_turn, ctx, context_pack=context_pack)
+        if direct:
+            return _outcome_from_direct_answer(direct)
+
+    payload = _planner_payload(user_text, ctx)
 
     ingress_requires_dai = bool(ingress.requires_dai)
     review_pending_candidate = bool((ingress.metadata or {}).get("review_pending_candidate"))
@@ -438,7 +733,7 @@ def run_plan_and_execute(
     po = invoke_planner(
         user_text=payload,
         source_turn_text=normalized_turn,
-        tool_catalog=get_tool_catalog(),
+        tool_catalog=get_tool_catalog_cai(),
         model=model,
         base_url=base_url,
         temperature=temperature,
@@ -465,6 +760,11 @@ def run_plan_and_execute(
         ingress_requires_dai=ingress_requires_dai,
         review_pending_candidate=review_pending_candidate,
     )
+
+    if task_type_v == "direct_response" and not v_todos and is_pure_identity_turn(normalized_turn):
+        direct = _try_direct_follow_up_answer(normalized_turn, ctx, context_pack=context_pack)
+        if direct:
+            return _outcome_from_direct_answer(direct)
 
     initial_plan = list(v_todos)
     todos: list[PlanStep] = list(v_todos)

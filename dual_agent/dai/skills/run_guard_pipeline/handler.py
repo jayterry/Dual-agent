@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from dual_agent.dai.guard_pipeline import run_guard_analysis_pipeline
+from dual_agent.dai.risk_analysis import run_risk_analysis
 from dual_agent.dai.schemas import DAIRequest
 from dual_agent.skill_types import SkillContext, SkillResult
 
@@ -33,7 +33,7 @@ def handle(args: dict[str, Any], ctx: SkillContext) -> SkillResult:
         )
     req = DAIRequest(user_text=user_text, artifact=artifact, context_pack=context_pack)
     try:
-        report = run_guard_analysis_pipeline(req, source=source)
+        report = run_risk_analysis(req, source=source)
     except Exception as e:  # noqa: BLE001
         return SkillResult(
             ok=False,

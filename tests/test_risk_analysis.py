@@ -1,4 +1,4 @@
-"""DAI risk_analysis：機器層 max 合成 + 語意護欄。"""
+"""DAI risk_analysis：融合 v2 + 語意護欄。"""
 
 from __future__ import annotations
 
@@ -16,25 +16,21 @@ from dual_agent.dai.schemas import DAIRequest
 
 def test_rules_password_high_score() -> None:
     res = score_r_rules("請立即驗證您的網路銀行密碼並回傳")
-    assert res.score == 25
+    assert res.score == 90
     assert any(h.rule_id == "password_credentials" for h in res.hits)
 
 
-def test_r_final_takes_max_rules_over_low_llm() -> None:
+def test_weighted_fusion_rules_plus_llm() -> None:
     with patch.dict(os.environ, {"DAI_SEMANTIC_LLM": "0"}, clear=False):
         report = run_risk_analysis(
             DAIRequest(user_text="請驗證網銀密碼", artifact="請驗證網銀密碼", sms_review=True),
         )
     cs = report["component_scores"]
-    assert cs["r_rules"] == 25
-    assert report["r_final_machine"] == max(
-        cs["r_rules"],
-        cs["r_threat_intel"],
-        cs["r_tls"],
-        cs["r_toxic_fused"],
-        cs["r_llm_optional"],
-    )
-    assert report["risk_score"] >= 25
+    assert cs["r_rules"] == 90
+    assert report["r_final_machine"] == 90
+    assert report["risk_fusion"]["mode"] == "machine_support_bonus_weighted"
+    assert report["risk_fusion"]["llm_weight"] == 0.35
+    assert report["risk_score"] >= 85
 
 
 def test_threat_intel_phishing_dominates() -> None:
@@ -60,7 +56,7 @@ def test_threat_intel_phishing_dominates() -> None:
             url_threat_hits_injected=hits,
         )
     assert report["component_scores"]["r_threat_intel"] == 40
-    assert report["r_final_machine"] == 40
+    assert report["r_final_machine"] >= 40
 
 
 def test_missing_tls_zero_and_listed() -> None:
@@ -91,7 +87,7 @@ def test_urgency_only_low_semantic_score() -> None:
     assert sem["r_llm_optional"] == 0
 
 
-@patch("dual_agent.dai.risk_analysis.pipeline.invoke_semantic_supplement")
+@patch("dual_agent.dai.skills._pipeline_steps.invoke_semantic_supplement")
 def test_semantic_cannot_invent_threat_intel_score(mock_sem: object) -> None:
     mock_sem.return_value = {
         "r_llm_optional": 90,
@@ -109,34 +105,64 @@ def test_semantic_cannot_invent_threat_intel_score(mock_sem: object) -> None:
             url_threat_hits_injected=[],
             tls_findings_injected=[],
         )
-    # max() 仍不含捏造：機器全 0 時 r_final 應被 cap 在語意層 32 以內，且測試重點是 r_threat_intel=0
     assert report["component_scores"]["r_threat_intel"] == 0
     assert report["component_scores"]["r_tls"] == 0
     assert report["component_scores"]["r_llm_optional"] <= 32
-    assert report["r_final_machine"] <= 32
+    assert report["r_final_machine"] == 0
+    assert report["risk_fusion"]["r_fused_pre_ueba"] >= 30
 
 
-def test_max_not_average() -> None:
+def test_llm_weight_35_when_machine_low() -> None:
+    from dual_agent.dai.risk_analysis.verdict import (
+        fuse_risk_score_weighted,
+        scale_llm_score_to_100,
+    )
+
+    llm100 = scale_llm_score_to_100(20, tier_h=10, tier_i=5)
+    fusion = fuse_risk_score_weighted(
+        r_rules=0,
+        r_threat_intel=0,
+        r_tls=0,
+        r_toxic_fused=0,
+        r_llm_optional=20,
+        tier_h=10,
+        tier_i=5,
+        llm_weight=0.35,
+    )
+    assert fusion.machine.r_machine_final == 0
+    assert fusion.r_llm_100 == llm100
+    assert fusion.r_fused == round(0.65 * 0 + 0.35 * llm100)
+
+
+def test_machine_support_not_simple_average() -> None:
     with patch.dict(os.environ, {"DAI_SEMANTIC_LLM": "0"}, clear=False):
         report = run_risk_analysis(
             DAIRequest(
-                user_text="請驗證網銀密碼 http://evil.test",
-                artifact="請驗證網銀密碼",
+                user_text="帳戶異常請立即驗證 https://evil.test/x",
+                artifact="帳戶異常請立即驗證 https://evil.test/x",
             ),
             url_threat_hits_injected=[
                 {
-                    "url": "http://evil.test",
-                    "hits": {"virustotal": True, "phishtank": False, "urlhaus": False, "taiwan_165": False, "telco_blocklist": False},
+                    "url": "https://evil.test/x",
+                    "hits": {
+                        "virustotal": True,
+                        "phishtank": False,
+                        "urlhaus": False,
+                        "taiwan_165": False,
+                        "telco_blocklist": False,
+                    },
                     "vendor_count": 1,
                     "label": "phishing",
                 }
             ],
         )
     cs = report["component_scores"]
-    expected = max(cs["r_rules"], cs["r_threat_intel"], cs["r_tls"], cs["r_toxic_fused"], cs["r_llm_optional"])
-    assert report["r_final_machine"] == expected
-    assert report["r_final_machine"] != int(
+    assert report["risk_fusion"]["mode"] == "machine_support_bonus_weighted"
+    assert cs["r_machine_final"] >= cs["r_rules"]
+    fused = int(report["risk_fusion"]["r_fused_pre_ueba"])
+    naive_avg = int(
         round(
             (cs["r_rules"] + cs["r_threat_intel"] + cs["r_tls"] + cs["r_toxic_fused"] + cs["r_llm_optional"]) / 5
         )
     )
+    assert fused != naive_avg

@@ -88,6 +88,10 @@ def invoke_semantic_supplement(
 
 若 component_scores 的 Tier1/2 機器分皆低且僅緊急語氣，tier_h 與 tier_i 必須 <=5，r_llm_optional 必須 <=5。
 
+labels 請優先使用標準鍵（可多選）：
+financial_extortion, payment_pressure, physical_threat, credential_harvesting,
+phishing, impersonation, malicious_link, urgency_pressure, suspicious_notification
+
 輸出 JSON：
 {{
   "tier_h": 0-20,
@@ -95,7 +99,7 @@ def invoke_semantic_supplement(
   "r_llm_optional": 0-32,
   "explanation": "...",
   "safety_summary": "...",
-  "labels": ["..."],
+  "labels": ["phishing"],
   "quotes": [{{"tier":"H|I","text":"..."}}]
 }}
 """.strip(),

@@ -49,4 +49,5 @@ class SkillSpec:
     requires_confirmation: bool = False
     args_schema: dict[str, Any] = field(default_factory=dict)
     skill_dir: str | None = None
+    agent: Literal["cai", "dai"] = "cai"
 

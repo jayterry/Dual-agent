@@ -6,7 +6,7 @@ from typing import Any
 from dual_agent.dai.invoke import invoke_dai
 from dual_agent.dai.risk_analysis.reporting import risk_report_to_dai_payload
 from dual_agent.dai.user_db import enrich_dai_payload_with_ueba
-from dual_agent.dai.schemas import DAIRequest, DAIResult, DefenseObservation
+from dual_agent.dai.schemas import DAIRequest, DAIResult
 from dual_agent.cai.review_entry_eligibility import artifact_meta_only_for_dai
 from dual_agent.skill_types import SkillContext, SkillResult
 
@@ -31,7 +31,6 @@ ARGS_SCHEMA: dict[str, Any] = {
 }
 
 
-# 常見「還沒貼簡訊正文」的占位句；勿送進 DAI 以免誤判風險
 _PLACEHOLDER_ARTIFACTS: frozenset[str] = frozenset(
     {
         "我收到一則簡訊",
@@ -55,9 +54,6 @@ def _norm_artifact(s: str) -> str:
 
 
 def artifact_is_meta_only_intent(artifact: str) -> bool:
-    """
-    若為「僅宣告收到／要審簡訊」而無可審正文，回 True；Executor 應改走 ask_user，不呼叫 invoke_dai。
-    """
     if artifact_meta_only_for_dai(artifact):
         return True
     t = _norm_artifact(artifact)
@@ -98,73 +94,28 @@ def _boolish(v: Any, default: bool) -> bool:
     return default
 
 
-def _observation_dict(o: DefenseObservation) -> dict[str, Any]:
-    return {"skill": o.skill, "ok": o.ok, "summary": o.summary, "data": dict(o.data or {})}
+def _extract_report_from_result(out: DAIResult) -> dict[str, Any] | None:
+    """從 defense_observations 取出完整 DAG report（含 display_text）。"""
+    best: dict[str, Any] | None = None
+    for obs in out.defense_observations:
+        data = obs.data if hasattr(obs, "data") else {}
+        if not isinstance(data, dict):
+            continue
+        nested = data.get("report")
+        if isinstance(nested, dict) and nested.get("component_scores"):
+            best = nested
+            continue
+        if data.get("component_scores"):
+            best = data
+    return best
 
 
-def _evidence_reason_text(item: dict[str, Any]) -> str:
-    note = str(item.get("note") or "").strip()
-    if note:
-        return note
-    src = str(item.get("source") or "").strip()
-    verdict = str(item.get("verdict") or "").strip()
-    if src and verdict:
-        return f"{src} 判定：{verdict}"
-    if src:
-        return f"證據來源：{src}"
-    if verdict:
-        return f"判定：{verdict}"
-    if item:
-        joined = "、".join(f"{k}={v}" for k, v in item.items())
-        return joined.strip()
-    return ""
-
-
-def _reason_highlights(r: DAIResult, *, limit: int = 3) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-
-    def add(text: str) -> None:
-        s = str(text or "").strip()
-        if not s or s in seen:
-            return
-        seen.add(s)
-        out.append(s[:160])
-
-    for obs in r.defense_observations:
-        add(obs.summary)
-        if len(out) >= limit:
-            return out
-
-    for item in r.evidence:
-        if isinstance(item, dict):
-            add(_evidence_reason_text(item))
-        elif isinstance(item, str):
-            add(item)
-        if len(out) >= limit:
-            return out
-
-    for label in r.risk_labels:
-        add(f"風險標籤：{label}")
-        if len(out) >= limit:
-            return out
-    return out
-
-
-def _dai_payload(r: DAIResult) -> dict[str, Any]:
-    return {
-        "ok": r.ok,
-        "risk_score": r.risk_score,
-        "risk_labels": list(r.risk_labels),
-        "safety_summary": r.safety_summary,
-        "evidence": list(r.evidence),
-        "tool_restrictions": dict(r.tool_restrictions or {}),
-        "recommended_cai_action": r.recommended_cai_action,
-        "defense_llm_turns": r.defense_llm_turns,
-        "defense_observations": [_observation_dict(o) for o in r.defense_observations],
-        "reason_highlights": _reason_highlights(r),
-        "error": r.error,
-    }
+def _dai_payload_from_report(report: dict[str, Any], out: DAIResult) -> dict[str, Any]:
+    payload = risk_report_to_dai_payload(report)
+    payload["ok"] = out.ok
+    payload["error"] = out.error
+    payload["defense_llm_turns"] = out.defense_llm_turns
+    return payload
 
 
 def handle(args: dict[str, Any], ctx: SkillContext) -> SkillResult:
@@ -218,31 +169,38 @@ def handle(args: dict[str, Any], ctx: SkillContext) -> SkillResult:
     if out.ok:
         ctx.policy_state.pop("pending_review", None)
 
-    if out.defense_observations and isinstance(out.defense_observations[0].data, dict):
-        obs_data = out.defense_observations[0].data
-        if "component_scores" in obs_data:
-            payload = risk_report_to_dai_payload(obs_data)
-        else:
-            payload = _dai_payload(out)
+    report = _extract_report_from_result(out)
+    if report:
+        payload = _dai_payload_from_report(report, out)
     else:
-        payload = _dai_payload(out)
+        payload = {
+            "ok": out.ok,
+            "risk_score": out.risk_score,
+            "verdict": "allow",
+            "safety_summary": out.safety_summary,
+            "recommended_cai_action": out.recommended_cai_action,
+            "reason_highlights": [],
+            "user_reason_highlights": [],
+            "user_suggestions": [],
+            "display_text": "",
+            "error": out.error,
+        }
+
     if not payload.get("risk_user"):
         payload = enrich_dai_payload_with_ueba(
             payload, text=artifact, source=review_source or None
         )
-    reasons = list(payload.get("reason_highlights") or [])
-    head = (out.safety_summary or "").strip().split("\n", 1)[0][:400]
-    score_head = f"風險分數 {out.risk_score}/100"
-    if head:
-        summary = f"[DAI] {score_head}；{head}"
-    elif reasons:
-        summary = f"[DAI] {score_head}；{reasons[0]}"
+
+    display = str(payload.get("display_text") or "").strip()
+    if display:
+        summary = f"[DAI] {display.splitlines()[0]}"
     else:
-        summary = f"[DAI] {score_head}；建議動作 {out.recommended_cai_action}"
+        summary = f"[DAI] 風險分數 {out.risk_score}/100"
+
     return SkillResult(
         ok=out.ok,
         skill="call_dai",
         summary=summary,
         data={"dai": payload, "risk_user": payload.get("risk_user")},
-        evidence=[f"recommended_cai_action={out.recommended_cai_action}"],
+        evidence=[f"recommended_cai_action={payload.get('recommended_cai_action')}"],
     )

@@ -34,7 +34,15 @@ def _pending_review_followup_should_drop_dai(user_text: str) -> bool:
     t = (user_text or "").strip()
     if not t:
         return False
+    from dual_agent.cai.follow_up_direct import classify_follow_up_question
+
+    if classify_follow_up_question(t) in ("user_identity", "assistant_identity"):
+        return True
     if meta_assistant_or_chat_scope(t):
+        return True
+    from dual_agent.cai.memory_direct import looks_like_memory_clarification_turn
+
+    if looks_like_memory_clarification_turn(t):
         return True
     if len(t) <= 40 and re.search(r"天氣|氣溫|下雨|降雨|颱風|風力", t):
         return True
@@ -52,6 +60,10 @@ def meta_assistant_or_chat_scope(user_text: str) -> bool:
     if not t:
         return False
     patterns: Final[tuple[str, ...]] = (
+        r"^你是誰[?？!！。…\s]*$",
+        r"^你又是誰[?？!！。…\s]*$",
+        r"^我是誰[?？!！。…\s]*$",
+        r"^你知道我是誰[?？!！。…\s]*$",
         r"(想知道|想了解).{0,14}(你|您|助理).{0,10}(可以|能|會).{0,8}(做|幫).{0,6}(什麼|甚麼|哪些)",
         r"你(可以|能|會).{0,8}(做|幫).{0,10}(什麼|甚麼|哪些)",
         r"(像是|例如).{0,8}(執行|做).{0,10}(什麼|甚麼).{0,6}(任務|事情|事)",
@@ -157,7 +169,11 @@ def validate_planner_output(
         new_msg = f"{prefix}{message}".strip() if message else prefix
         return [], "direct_response", "answering", new_msg
 
-    gate_empty_artifact = (itt == "check" or (pending_review and itt == "unknown")) and (not art_stripped)
+    gate_empty_artifact = (not art_stripped) and (
+        itt == "check"
+        or review_pending_candidate
+        or (pending_review and itt == "unknown")
+    )
     if gate_empty_artifact:
         todos = _normalize_pending_call_dai_artifacts(todos, user_text)
         if pending_review and _pending_review_followup_should_drop_dai(user_text):
@@ -200,6 +216,16 @@ def validate_planner_output(
         prefix = "（規劃已校正：審查任務尚未取得待審內容，已改為 ask_user，不可 call_dai／search_web。）"
         new_msg = f"{prefix}{message}".strip() if message else prefix
         return [_review_ask_user_step()], "check", "waiting_input", new_msg
+
+    if review_pending_candidate and _todos_have_call_dai(todos):
+        dai_st = _first_call_dai_step(todos)
+        d_art = ""
+        if dai_st is not None:
+            d_art = str((dai_st.args or {}).get("artifact") or "").strip() or (user_text or "").strip()
+        if (not art_stripped) and (not d_art or artifact_is_meta_only_intent(d_art)):
+            prefix = "（規劃已校正：尚缺待審正文，不可 call_dai，改為 ask_user。）"
+            new_msg = f"{prefix}{message}".strip() if message else prefix
+            return [_review_ask_user_step()], "check", "waiting_input", new_msg
 
     if review_pending_candidate and _todos_have_web_search(todos):
         prefix = "（規劃已校正：尚缺待審正文（review_pending_candidate），不可用 search_web 代替，改為 ask_user。）"

@@ -41,11 +41,10 @@ def test_call_dai_skill_mock() -> None:
     assert r.ok
     assert r.skill == "call_dai"
     assert "DAI" in r.summary
-    assert "風險分數 42/100" in r.summary
+    assert "風險分數" in r.summary
     dai = r.data.get("dai") or {}
     assert dai.get("risk_score") == 42
-    assert "scan ok" in (dai.get("reason_highlights") or [])
-    assert len(dai.get("defense_observations") or []) == 1
+    assert dai.get("reason_highlights") == []
 
 
 def test_call_dai_skill_missing_body() -> None:
@@ -94,17 +93,39 @@ def test_call_dai_accepts_substantive_sms_body() -> None:
     assert r.ok
 
 
-def test_call_dai_display_excerpt_includes_score_and_reasons() -> None:
+def test_call_dai_display_excerpt_includes_display_text() -> None:
+    display = (
+        "風險分數：88/100\n判定：block\n\n主要原因：\n• 涉及匯款\n\n建議：\n• 不要匯款"
+    )
+    full_report = {
+        "risk_score": 88,
+        "verdict": "block",
+        "recommended_cai_action": "block",
+        "safety_summary": "綜合風險 88/100，判定 block。",
+        "component_scores": {"r_rules": 40},
+        "display_text": display,
+        "user_reason_highlights": ["涉及匯款"],
+        "user_suggestions": ["不要匯款"],
+        "reason_highlights": ["硬規則命中（40 分）"],
+        "labels": [],
+        "track_a": {},
+        "analysis_payload": {},
+    }
     fake = DAIResult(
         ok=True,
         risk_score=88,
         risk_labels=["scam"],
-        safety_summary="高風險詐騙，請勿匯款。",
-        evidence=[{"source": "guard_scan", "verdict": "block"}],
+        safety_summary=full_report["safety_summary"],
+        evidence=[],
         tool_restrictions={},
         recommended_cai_action="block",
         defense_observations=[
-            DefenseObservation(skill="guard_scan", ok=True, summary="要求匯款且帶恐嚇語氣", data={})
+            DefenseObservation(
+                skill="fuse_risk_and_ueba",
+                ok=True,
+                summary="fuse ok",
+                data={"step": "fuse_risk_and_ueba", "report": full_report},
+            ),
         ],
         defense_llm_turns=1,
         error=None,
@@ -118,5 +139,5 @@ def test_call_dai_display_excerpt_includes_score_and_reasons() -> None:
         )
     shown = format_results_for_display([r])
     assert "風險分數：88/100" in shown
+    assert "判定：block" in shown
     assert "主要原因：" in shown
-    assert "要求匯款且帶恐嚇語氣" in shown

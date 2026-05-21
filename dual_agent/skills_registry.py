@@ -10,7 +10,7 @@ import re
 import subprocess
 import textwrap
 import webbrowser
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote_plus, urlparse
 
 from dual_agent.skill_types import RiskLevel, SkillContext, SkillResult, SkillSpec
@@ -102,6 +102,8 @@ def _load_skill_specs_from_dirs() -> dict[str, SkillSpec]:
         if not os.path.isdir(base):
             continue
         for entry in os.listdir(base):
+            if entry.startswith("_"):
+                continue
             skill_dir = os.path.join(base, entry)
             if not os.path.isdir(skill_dir):
                 continue
@@ -136,6 +138,8 @@ def _load_skill_specs_from_dirs() -> dict[str, SkillSpec]:
             if not isinstance(args_schema, dict):
                 args_schema = {}
 
+            norm_dir = skill_dir.replace("\\", "/")
+            agent: Literal["cai", "dai"] = "dai" if "/dai/skills/" in norm_dir else "cai"
             skills[name] = SkillSpec(
                 name=name,
                 description=desc,
@@ -145,6 +149,7 @@ def _load_skill_specs_from_dirs() -> dict[str, SkillSpec]:
                 requires_confirmation=requires_conf,
                 args_schema=args_schema,
                 skill_dir=skill_dir,
+                agent=agent,
             )
     return skills
 
@@ -366,23 +371,31 @@ def _spawn_windows_command(resolved_path: str) -> tuple[bool, str | None]:
 SKILLS: dict[str, SkillSpec] = _load_skill_specs_from_dirs()
 
 
+def _catalog_entry(spec: SkillSpec) -> dict[str, Any]:
+    return {
+        "name": spec.name,
+        "aliases": list(spec.aliases),
+        "description": spec.description,
+        "risk_level": spec.risk_level,
+        "requires_confirmation": spec.requires_confirmation,
+        "args_schema": spec.args_schema,
+        "agent": spec.agent,
+    }
+
+
+def get_tool_catalog_cai() -> list[dict[str, Any]]:
+    """CAI Planner：僅 cai/skills（含 call_dai）。"""
+    return [_catalog_entry(spec) for spec in SKILLS.values() if spec.agent == "cai"]
+
+
+def get_tool_catalog_dai() -> list[dict[str, Any]]:
+    """Defense LLM：僅 dai/skills。"""
+    return [_catalog_entry(spec) for spec in SKILLS.values() if spec.agent == "dai"]
+
+
 def get_tool_catalog() -> list[dict[str, Any]]:
-    """
-    給 Planner / UI 的工具目錄。保持可序列化、可讀。
-    """
-    out: list[dict[str, Any]] = []
-    for spec in SKILLS.values():
-        out.append(
-            {
-                "name": spec.name,
-                "aliases": list(spec.aliases),
-                "description": spec.description,
-                "risk_level": spec.risk_level,
-                "requires_confirmation": spec.requires_confirmation,
-                "args_schema": spec.args_schema,
-            }
-        )
-    return out
+    """合併目錄（向後相容）。"""
+    return [_catalog_entry(spec) for spec in SKILLS.values()]
 
 
 def list_skill_names() -> list[str]:
@@ -414,6 +427,26 @@ def run_skill(name: str, args: dict[str, Any], ctx: SkillContext) -> SkillResult
             ok=False,
             skill=spec.name,
             summary=f"技能執行失敗：{e}",
+            error=str(e),
+        )
+
+
+SKILLS_DAI: dict[str, SkillSpec] = {k: v for k, v in SKILLS.items() if v.agent == "dai"}
+SKILLS_CAI: dict[str, SkillSpec] = {k: v for k, v in SKILLS.items() if v.agent == "cai"}
+
+
+def run_dai_skill(name: str, args: dict[str, Any], ctx: SkillContext) -> SkillResult:
+    key = _resolve_skill_name(name)
+    if key is None or key not in SKILLS_DAI:
+        shown = (name or "").strip() or "?"
+        return SkillResult(ok=False, skill=shown, summary=f"未知 DAI 技能：{name!r}", error="unknown_dai_skill")
+    try:
+        return SKILLS_DAI[key].handler(args, ctx)
+    except Exception as e:  # noqa: BLE001
+        return SkillResult(
+            ok=False,
+            skill=key,
+            summary=f"DAI 技能執行失敗：{e}",
             error=str(e),
         )
 

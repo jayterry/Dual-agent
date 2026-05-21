@@ -9,7 +9,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_ollama import ChatOllama
 
-from dual_agent.llm_json import coerce_llm_bool, coerce_llm_text, extract_json_object
+from dual_agent.llm_json import coerce_llm_bool, coerce_llm_text, invoke_and_parse_json
 from dual_agent.cai.planner_context import post_process_replan_todos
 from dual_agent.cai.schemas import PlanStep, ReplanOutput
 
@@ -59,7 +59,7 @@ def invoke_replan(
 
 【search_web 特別說明】若 observation 顯示 `search_web` **僅**「已開啟搜尋」或**僅**含搜尋 URL、而**沒有**任何網頁正文／搜尋結果摘要，代表助理**尚未讀取**結果頁內容：`final_answer` **不得**假裝已看過搜尋結果，也**不得**虛構條目細節（地址、營業項目、觀光體驗、歷史沿革等）。應簡短說明已在瀏覽器開啟搜尋、請使用者自行查閱分頁；若需要口頭摘要，可一句話建議使用者貼上**官方網址**以便後續用 `fetch_url` 讀正文（**不要**在無正文時硬寫百科式介紹）。
 
-【call_dai／簡訊審查】若 observation 含 `call_dai` 或摘要前綴 **[DAI]**：請以紀錄中的風險分數、`safety_summary`、主要原因（如 `reason_highlights`、evidence、defense observation 摘要）與建議動作為準整合回答，**不要**自創未出現在紀錄中的法律後果或機關名稱細節。若紀錄已提供風險分數，`final_answer` 應明確寫出「風險分數 XX/100」，並簡短列出 1-3 個主要原因給使用者看。
+【call_dai／簡訊審查】若 observation 含 `call_dai` 或摘要前綴 **[DAI]**：若紀錄含 `display_text`（或同等結構：風險分數／判定／主要原因／建議），**`final_answer` 應優先完整複述 `display_text`**，與 App 風險卡一致。**禁止**另寫 `risk_fusion.r_final`、`component_scores` 或第二套分數；**禁止**把 DAG 步驟名（如 `build_analysis_payload`）當主要原因。若無 `display_text`，僅以紀錄中的單一 `risk_score`、`verdict` 與 `user_reason_highlights`／`user_suggestions` 整合，勿自創法律後果或機關細節。
 
 【絕對禁止捏造審核分數】若 observation_log **不包含** **`call_dai` 的成功執行摘要**（或不含 **[DAI]**、不含任何由 DAI／工具回傳的風險分數紀錄），則 **`final_answer` 不得**書寫「風險分數」「xx/100」「已審查完成」「審核結果為…分」等審級結論；應請使用者貼上完整待審內容或使用送審，或說明目前無法評分。
 
@@ -70,9 +70,12 @@ def invoke_replan(
 
 【人物名稱與關係事實】
 - **「我是誰」與「你是誰」不可混淆**：前者只答使用者稱呼；後者只答助理身份。使用者自稱的名字**不得**當成助理名字（禁止「我是您的智能助理 Alex」）。答「我是誰」時**不要**順便否定「我是某某」——那句只適用於使用者問「你是某某嗎」時。
+- **禁止回音**：`final_answer` **不得**與本輪使用者原句完全相同（例如使用者問「你是誰」，不得只回「你是誰」）。
+- **「我是誰」**：若 Context 有 `display_name`，必須以「您是／你叫 ○○」等完整稱呼句回答，**不得**只回單一名字或單字。
 - 若 `Context Pack` 已明說人物名稱、關係或稱呼（例如「我叫 Terry」「你現在叫 CAI」「我媽媽叫 mei」），回答此類問題時應**直接引用已知事實**，不要退化成泛稱（例如只說「你的母親」）。
 - 若 `Context Pack` 對同一事實有多個版本，**以較新的「使用者明確更正」為準**；較早輪次的舊稱呼、助理先前自稱或模糊說法，不得覆蓋使用者後來的更正。
 - 只有在 `Context Pack` 中**真的沒有**足夠事實時，才可回答不知道、請使用者補充或再次確認。
+- 若【長期記憶】的「使用者告知的事實」已含該姓名／關係，或本輪使用者是在**肯定**先前同一確認問句：**禁止**再輸出相同「您是說…嗎」確認句；應 `complete=true` 並引用已記住事實，或簡短表示已記住。
 
 【review pending】
 - 若 `pending_review=true`：表示系統已判定這是一個審查事件，可能仍在等待待審正文。
@@ -139,19 +142,38 @@ remaining_todos（JSON）：
             ),
         ]
     )
-    raw = (prompt | llm | StrOutputParser()).invoke(
-        {
-            "context_pack": (context_pack or "").strip() or "（無）",
-            "user_text": user_text.strip(),
-            "task_type": task_type,
-            "task_state": task_state,
-            "pending_review": "true" if pending_review else "false",
-            "preamble": preamble or "（無）",
-            "remaining_json": _todo_json(remaining_todos),
-            "obs": obs,
-        }
-    )
-    obj = extract_json_object(raw)
+    chain = prompt | llm | StrOutputParser()
+    inputs = {
+        "context_pack": (context_pack or "").strip() or "（無）",
+        "user_text": user_text.strip(),
+        "task_type": task_type,
+        "task_state": task_state,
+        "pending_review": "true" if pending_review else "false",
+        "preamble": preamble or "（無）",
+        "remaining_json": _todo_json(remaining_todos),
+        "obs": obs,
+    }
+
+    def _invoke() -> str:
+        return chain.invoke(inputs)
+
+    def _retry_invoke() -> str:
+        retry_prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    "你剛才沒有輸出合法 JSON。請只輸出單一 JSON 物件，鍵名："
+                    "complete, final_answer, updated_todos, task_state, waiting_input, user_prompt。"
+                    "不要 markdown。",
+                ),
+                ("human", "使用者需求：{user_text}\n執行紀錄：{obs}"),
+            ]
+        )
+        return (retry_prompt | llm | StrOutputParser()).invoke(
+            {"user_text": user_text.strip(), "obs": obs[:4000]}
+        )
+
+    obj = invoke_and_parse_json(_invoke, retry_invoke=_retry_invoke)
 
     complete = coerce_llm_bool(obj.get("complete"))
     final_answer = coerce_llm_text(obj.get("final_answer"))

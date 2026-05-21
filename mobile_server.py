@@ -14,16 +14,22 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from dual_agent.cai.context_layer import (
     SessionMemory,
+    append_confirmed_fact_to_rolling_summary,
     build_plan_summary,
+    clear_relation_fact,
+    merge_relation_fact,
     merge_user_profile,
+    normalize_user_facts,
     pack_context,
     record_turn,
     record_turn_after_review,
+    remove_confirmed_fact_from_rolling_summary,
 )
 from dual_agent.cai.executor import format_results_for_display
 from dual_agent.cai.plan_execute import compose_review_user_text, run_dai_then_replan, run_plan_and_execute
@@ -40,6 +46,37 @@ from dual_agent.skill_types import SkillContext
 app = FastAPI(title="Dual-agent Mobile API", version="0.3.0")
 
 _SESSION_TTL_SEC = max(60, int(os.environ.get("MOBILE_SESSION_TTL_SEC", "7200")))
+
+
+def _ollama_unavailable_message(exc: BaseException) -> str | None:
+    """連線被拒時回傳給手機端的說明文字。"""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if "connect" in text or "10061" in text or "connection refused" in text:
+        return (
+            f"無法連線 Ollama（{OLLAMA_BASE_URL}）。"
+            "請先啟動 Ollama，並確認已 pull 模型 "
+            f"{OLLAMA_MODEL}。"
+        )
+    return None
+
+
+@app.exception_handler(ValueError)
+async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
+    msg = str(exc)
+    if "無法解析計畫 JSON" in msg:
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "無法解析助理計畫（模型 JSON 格式異常），請再試一次或簡化問題後重送。"},
+        )
+    return JSONResponse(status_code=422, content={"detail": msg[:500]})
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    hint = _ollama_unavailable_message(exc)
+    if hint:
+        return JSONResponse(status_code=503, content={"detail": hint})
+    return JSONResponse(status_code=500, content={"detail": str(exc)[:500]})
 
 
 @dataclass
@@ -105,17 +142,55 @@ def _prepare_context(ent: _SessionEntry, profile: UserProfileBody | None) -> str
     cp = pack_context(ent.memory)
     ent.ctx.policy_state["context_pack"] = cp
     ent.ctx.policy_state["user_profile"] = dict(ent.memory.user_profile or {})
+    ent.ctx.policy_state["user_facts"] = normalize_user_facts(ent.memory.user_facts)
     ent.ctx.policy_state["task_snapshot"] = dict(ent.memory.task_snapshot or {})
     return cp
+
+
+def _sync_user_facts_from_ctx(ent: _SessionEntry) -> None:
+    """將本輪確認寫入的 user_facts 同步至 SessionMemory 與 rolling_summary。"""
+    incoming = normalize_user_facts(ent.ctx.policy_state.get("user_facts"))
+    stored = normalize_user_facts(ent.memory.user_facts)
+    stored_rels = dict(stored.get("relations") or {})
+    incoming_rels = dict(incoming.get("relations") or {})
+
+    for rel in stored_rels:
+        if rel not in incoming_rels or not incoming_rels.get(rel):
+            clear_relation_fact(ent.memory, rel)
+            remove_confirmed_fact_from_rolling_summary(ent.memory, rel)
+
+    for rel, names in incoming_rels.items():
+        in_list = list(names) if isinstance(names, list) else [str(names)]
+        if not in_list:
+            clear_relation_fact(ent.memory, rel)
+            remove_confirmed_fact_from_rolling_summary(ent.memory, rel)
+            continue
+        stored_list = list((stored_rels.get(rel) or []))
+        changed = False
+        for v in in_list:
+            val = str(v or "").strip()
+            if not val:
+                continue
+            if any(val.casefold() == s.casefold() for s in stored_list):
+                continue
+            merge_relation_fact(ent.memory, rel, val, append=True)
+            changed = True
+        if changed:
+            append_confirmed_fact_to_rolling_summary(ent.memory, rel)
+    ent.memory.user_facts = incoming
 
 
 def _extract_dai_from_results(results: list[Any]) -> dict[str, Any] | None:
     for r in reversed(results):
         if getattr(r, "skill", "") != "call_dai":
             continue
+        if not getattr(r, "ok", False):
+            continue
+        if getattr(r, "error", None) == "artifact_meta_only":
+            continue
         data = getattr(r, "data", {}) or {}
         dai = data.get("dai")
-        if isinstance(dai, dict):
+        if isinstance(dai, dict) and dai:
             return dai
     return None
 
@@ -132,22 +207,32 @@ def _build_memory_assistant_text(answer: str, results: list[Any]) -> str:
     dai = _extract_dai_from_results(results)
     if not dai:
         return base
-    lines = ["【DAI 風險摘要】"]
-    score = dai.get("risk_score")
-    if isinstance(score, (int, float)):
-        lines.append(f"風險分數：{int(score)}/100")
-    action = str(dai.get("recommended_cai_action") or "").strip()
-    if action:
-        lines.append(f"建議動作：{action}")
-    summary = str(dai.get("safety_summary") or "").strip()
-    if summary:
-        lines.append(f"摘要：{summary[:300]}")
-    reasons = dai.get("reason_highlights") or []
-    if isinstance(reasons, list):
-        picked = [str(x).strip()[:160] for x in reasons if str(x).strip()][:3]
-        if picked:
-            lines.append("主要原因：")
-            lines.extend(f"- {x}" for x in picked)
+    display = str(dai.get("display_text") or "").strip()
+    if display:
+        lines = ["【DAI 風險摘要】", display]
+    else:
+        lines = ["【DAI 風險摘要】"]
+        score = dai.get("risk_score")
+        if isinstance(score, (int, float)):
+            lines.append(f"風險分數：{int(score)}/100")
+        verdict = str(dai.get("verdict") or "").strip()
+        if verdict:
+            lines.append(f"判定：{verdict}")
+        action = str(dai.get("recommended_cai_action") or "").strip()
+        if action:
+            lines.append(f"建議動作：{action}")
+        reasons = dai.get("user_reason_highlights") or dai.get("reason_highlights") or []
+        if isinstance(reasons, list):
+            picked = [str(x).strip()[:160] for x in reasons if str(x).strip()][:5]
+            if picked:
+                lines.append("主要原因：")
+                lines.extend(f"- {x}" for x in picked)
+        suggestions = dai.get("user_suggestions") or []
+        if isinstance(suggestions, list):
+            picked_s = [str(x).strip()[:160] for x in suggestions if str(x).strip()][:5]
+            if picked_s:
+                lines.append("建議：")
+                lines.extend(f"- {x}" for x in picked_s)
     block = "\n".join(lines)
     if base and block:
         return f"{base}\n\n{block}"
@@ -157,9 +242,12 @@ def _build_memory_assistant_text(answer: str, results: list[Any]) -> str:
 def _outcome_to_response(session_id: str, out: Any) -> dict[str, Any]:
     dai = _extract_dai_from_results(list(out.results or []))
     risk_user = _extract_risk_user(dai)
+    answer = (out.answer or "").strip()
+    if dai and ("待辦已空但 Replan" in answer or "Replan 未產生總結" in answer):
+        answer = _build_memory_assistant_text("", list(out.results or [])) or answer
     return {
         "session_id": session_id,
-        "answer": (out.answer or "").strip(),
+        "answer": answer,
         "dai": dai,
         "risk_user": risk_user,
         "task_type": getattr(out, "task_type", ""),
@@ -286,6 +374,7 @@ def chat(body: ChatBody, _: None = Depends(_require_token)) -> dict[str, Any]:
             plan_summary=build_plan_summary(out.plan),
             result_summary=format_results_for_display(out.results) if out.results else "",
         )
+    _sync_user_facts_from_ctx(ent)
     ent.ctx.policy_state["task_snapshot"] = dict(ent.memory.task_snapshot or {})
     resp = _outcome_to_response(sid, out)
     resp["mode"] = "chat_plan_execute"

@@ -32,7 +32,11 @@ def _search(text: str, patterns: tuple[str, ...]) -> str | None:
     return None
 
 
-# --- 各子項 0 或 25（Track A B–E 類）---
+def _has_any(text: str, patterns: tuple[str, ...]) -> bool:
+    return _search(text, patterns) is not None
+
+
+# --- 90：極高風險 ---
 _PWD = (
     r"驗證.{0,6}密碼",
     r"確認.{0,6}密碼",
@@ -99,6 +103,64 @@ _PAY_RANSOM = (
     r"威脅",
     r"恐嚇",
 )
+_PHYSICAL_THREAT = (
+    r"人身安全",
+    r"傷害.{0,6}家人",
+)
+
+# --- 60：高風險組合 ---
+_URL = (r"https?://", r"www\.", r"點擊.{0,6}連結", r"開啟.{0,6}連結")
+_ACCOUNT_ANOMALY = (
+    r"帳戶.{0,6}異常",
+    r"銀行.{0,6}異常",
+    r"帳戶.{0,6}凍結",
+    r"停權",
+    r"逾期未",
+)
+_URGENT_VERIFY = (
+    r"立即.{0,6}驗證",
+    r"馬上.{0,6}驗證",
+    r"限時.{0,6}驗證",
+    r"今日.{0,6}完成",
+    r"請立即",
+    r"請馬上",
+)
+
+# --- 25：低中風險 ---
+_LOAN_SCAM = (
+    r"借款",
+    r"貸款",
+    r"月計息",
+    r"無擔保",
+    r"免聯徵",
+    r"代償高利",
+    r"放款迅速",
+    r"以月計息",
+)
+_NH_CARD_LOAN = (r"健保卡.{0,12}借", r"健保卡借款", r"以健保卡")
+_UNSOLICITED_LOAN_PITCH = (
+    r"電洽\s*[:：]?\s*09\d{8}",
+    r"來電\s*[:：]?\s*09\d{8}",
+    r"09\d{8}.{0,20}(林|先生|小姐|女士)",
+)
+_IDENTITY_SCAM = (
+    r"實名認證",
+    r"實名制",
+    r"未辦理.{0,8}簽署",
+    r"未.{0,6}辦理.{0,8}認證",
+    r"政府補助",
+    r"物流.{0,6}異常",
+    r"包裹.{0,6}未取",
+)
+_LOW_FINANCE_NOTIFY = (
+    r"金融",
+    r"帳戶",
+    r"通知",
+    r"驗證",
+    r"補助",
+    r"繳款",
+    r"帳單",
+)
 
 
 def score_r_rules(text: str) -> RulesScoreResult:
@@ -107,15 +169,34 @@ def score_r_rules(text: str) -> RulesScoreResult:
         return RulesScoreResult(score=0, hits=[])
 
     hits: list[RuleHit] = []
-    checks: list[tuple[str, int, tuple[str, ...]]] = [
-        ("password_credentials", 25, _PWD),
-        ("otp", 25, _OTP),
-        ("card_bank_sensitive", 25, _CARD),
-        ("national_id_ubn", 25, _ID),
-        ("local_payment_pin", 25, _PAY_PIN),
-        ("payment_ransom_threat", 25, _PAY_RANSOM),
+
+    tier90: list[tuple[str, int, tuple[str, ...]]] = [
+        ("password_credentials", 90, _PWD),
+        ("otp", 90, _OTP),
+        ("card_bank_sensitive", 90, _CARD),
+        ("national_id_ubn", 90, _ID),
+        ("local_payment_pin", 90, _PAY_PIN),
+        ("payment_ransom_threat", 90, _PAY_RANSOM),
+        ("physical_threat", 90, _PHYSICAL_THREAT),
     ]
-    for rule_id, pts, pats in checks:
+    for rule_id, pts, pats in tier90:
+        q = _search(t, pats)
+        if q:
+            hits.append(RuleHit(rule_id=rule_id, points=pts, quote=q))
+
+    if _has_any(t, _URL) and _has_any(t, _ACCOUNT_ANOMALY) and _has_any(t, _URGENT_VERIFY):
+        parts = [_search(t, _URL), _search(t, _ACCOUNT_ANOMALY), _search(t, _URGENT_VERIFY)]
+        quote = " + ".join(p for p in parts if p)[:120]
+        hits.append(RuleHit(rule_id="high_risk_combo_link_account_urgent", points=60, quote=quote))
+
+    tier25: list[tuple[str, int, tuple[str, ...]]] = [
+        ("loan_scam", 25, _LOAN_SCAM),
+        ("nh_card_loan", 25, _NH_CARD_LOAN),
+        ("unsolicited_loan_pitch", 25, _UNSOLICITED_LOAN_PITCH),
+        ("identity_scam_framework", 25, _IDENTITY_SCAM),
+        ("low_finance_notify", 25, _LOW_FINANCE_NOTIFY),
+    ]
+    for rule_id, pts, pats in tier25:
         q = _search(t, pats)
         if q:
             hits.append(RuleHit(rule_id=rule_id, points=pts, quote=q))

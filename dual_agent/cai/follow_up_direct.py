@@ -16,7 +16,23 @@ def _compact(text: str) -> str:
     return re.sub(r"\s+", "", (text or "").strip())
 
 
+def is_pure_identity_turn(user_text: str) -> str | None:
+    """單句純身份問答（含換行則交給 Replan 合併回答）。"""
+    t = (user_text or "").strip()
+    if not t or "\n" in t:
+        return None
+    c = _compact(t)
+    if re.match(r"^(我是誰|你知道我是誰)[?？!！。…]*$", c):
+        return "user_identity"
+    if re.match(r"^(你是誰|你又是誰|你叫什麼)[?？!！。…]*$", t, re.IGNORECASE):
+        return "assistant_identity"
+    return None
+
+
 def classify_follow_up_question(user_text: str) -> str | None:
+    pure = is_pure_identity_turn(user_text)
+    if pure:
+        return pure
     t = (user_text or "").strip()
     if not t:
         return None

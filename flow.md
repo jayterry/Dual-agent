@@ -95,11 +95,11 @@ flowchart TD
 
   D_LLM --> DTYPE{Defense Task Type}
 
-  DTYPE -->|Risk Analysis| DTODO[產生 Defense Todo]
+  DTYPE -->|Risk Analysis / sms_review| DTODO[Defense 產生計畫<br/>defense_todos]
   DTYPE -->|Guarded Retrieval| DTODO
   DTYPE -->|Both| DTODO
 
-  DTODO --> D_EX[DAI Executor<br/>防禦子任務 · 讀取 Memory]
+  DTODO --> D_EX[DAI Executor<br/>固定 DAG：dai/skills ×7]
 
   D_EX --> DRES[DAI Result<br/>Safety Report · Evidence · Risk Score<br/>Tool Restrictions · Safe Context]
 

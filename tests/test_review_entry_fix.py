@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dual_agent.cai.planner_validate import validate_planner_output
 from dual_agent.cai.schemas import PlanStep
-from dual_agent.cai.review_entry_eligibility import looks_like_declarative_sms_receipt_only
+from dual_agent.cai.review_entry_eligibility import (
+    looks_like_declarative_sms_receipt_only,
+    looks_like_review_intent_without_artifact,
+)
 from dual_agent.cai.skills.call_dai.handler import artifact_is_meta_only_intent
 from dual_agent.ingress import extract_entities, normalize_ingress
 
@@ -22,8 +25,25 @@ def test_declarative_sms_template_variants() -> None:
         "收到一封怪怪的簡訊",
         "我剛收到一通奇怪訊息",
         "我收到一則簡訊",
+        "我剛剛收到一個簡訊，有點奇怪",
     ):
         assert looks_like_declarative_sms_receipt_only(s, extract_entities(s)), s
+
+
+def test_review_intent_without_artifact_unified() -> None:
+    for s in (
+        "我剛剛收到一個簡訊，有點奇怪",
+        "我收到一個奇怪的簡訊",
+        "幫我看看這是不是詐騙",
+        "你可以幫我看嗎",
+        "簡訊內容怪怪的",
+        "有人傳簡訊給我",
+        "收到一個可疑簡訊",
+        "我收到一封怪怪的簡訊",
+    ):
+        assert looks_like_review_intent_without_artifact(s, extract_entities(s)), s
+    raw = "幫我看是不是詐騙：親愛的會員請點擊 http://evil.test/x"
+    assert not looks_like_review_intent_without_artifact(raw, extract_entities(raw))
 
 
 def test_colon_reply_is_not_meta_only_declaration() -> None:

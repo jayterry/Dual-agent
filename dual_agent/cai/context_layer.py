@@ -42,6 +42,117 @@ class SessionMemory:
     recent_buffer: list[ConversationTurn] = field(default_factory=list)
     task_snapshot: dict[str, Any] = field(default_factory=dict)
     user_profile: dict[str, Any] = field(default_factory=dict)
+    user_facts: dict[str, Any] = field(default_factory=dict)
+
+
+# 人際關係同義詞 → 正規化稱呼（非允許清單；未列者保留原文）
+RELATION_ALIASES: dict[str, str] = {
+    "母親": "媽媽",
+    "媽": "媽媽",
+    "媽媽": "媽媽",
+    "父親": "爸爸",
+    "爸": "爸爸",
+    "爸爸": "爸爸",
+}
+
+
+def default_user_facts() -> dict[str, Any]:
+    return {"profile": {}, "relations": {}}
+
+
+def normalize_relation(relation: str) -> str:
+    """將同義詞正規化；不在 RELATION_ALIASES 則保留原文（如「弟弟」）。"""
+    r = (relation or "").strip()
+    if not r:
+        return r
+    return RELATION_ALIASES.get(r, r)
+
+
+def _coerce_relation_names(value: Any) -> list[str]:
+    """單一姓名或 list 皆轉成去重後的姓名列表。"""
+    if isinstance(value, list):
+        names = [str(x).strip() for x in value if str(x).strip()]
+    else:
+        s = str(value or "").strip()
+        names = [s] if s else []
+    out: list[str] = []
+    seen: set[str] = set()
+    for n in names:
+        key = n.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(n)
+    return out
+
+
+def _merge_name_lists(existing: list[str], new_names: list[str]) -> list[str]:
+    merged = list(existing)
+    seen = {n.casefold() for n in merged}
+    for n in new_names:
+        k = n.casefold()
+        if k in seen:
+            continue
+        seen.add(k)
+        merged.append(n)
+    return merged
+
+
+def normalize_user_facts(raw: dict[str, Any] | None) -> dict[str, Any]:
+    """統一為 {profile, relations}；relations 值為 list[str]；相容舊版單一字串。"""
+    if not raw or not isinstance(raw, dict):
+        return default_user_facts()
+    if "profile" in raw or "relations" in raw:
+        relations: dict[str, list[str]] = {}
+        for k, v in dict(raw.get("relations") or {}).items():
+            rel = normalize_relation(str(k))
+            names = _coerce_relation_names(v)
+            if not rel or not names:
+                continue
+            relations[rel] = _merge_name_lists(relations.get(rel, []), names)
+        return {
+            "profile": dict(raw.get("profile") or {}),
+            "relations": relations,
+        }
+    legacy_map = {
+        "mother_name": "媽媽",
+        "father_name": "爸爸",
+        "spouse_name": "配偶",
+        "child_name": "子女",
+    }
+    relations: dict[str, list[str]] = {}
+    profile: dict[str, str] = {}
+    for key, val in raw.items():
+        names = _coerce_relation_names(val)
+        if not names:
+            continue
+        if key in legacy_map:
+            rel = normalize_relation(legacy_map[key])
+            relations[rel] = _merge_name_lists(relations.get(rel, []), names)
+        elif key in ("user_name", "assistant_name"):
+            profile[key] = names[0]
+        else:
+            rel = normalize_relation(key)
+            relations[rel] = _merge_name_lists(relations.get(rel, []), names)
+    return {"profile": profile, "relations": relations}
+
+
+def get_relation_names(user_facts: dict[str, Any] | None, relation: str) -> list[str]:
+    uf = normalize_user_facts(user_facts)
+    rel = normalize_relation(relation)
+    return list((uf.get("relations") or {}).get(rel) or [])
+
+
+def format_relation_names(names: list[str]) -> str:
+    """繁中列舉：A、B 和 C。"""
+    picked = [str(n).strip() for n in names if str(n).strip()]
+    if not picked:
+        return ""
+    if len(picked) == 1:
+        return picked[0]
+    if len(picked) == 2:
+        return f"{picked[0]} 和 {picked[1]}"
+    return "、".join(picked[:-1]) + f" 和 {picked[-1]}"
 
 
 def _compact_summary_value(value: Any, *, max_chars: int = 120) -> Any:
@@ -164,6 +275,108 @@ def display_name_from_profile(user_profile: dict[str, Any] | None) -> str | None
     return name or None
 
 
+def merge_profile_fact(session: SessionMemory, key: str, value: str) -> None:
+    k = (key or "").strip()
+    v = (value or "").strip()
+    if not k or not v:
+        return
+    uf = normalize_user_facts(session.user_facts)
+    uf["profile"][k] = v
+    session.user_facts = uf
+
+
+def merge_relation_fact(
+    session: SessionMemory,
+    relation: str,
+    value: str,
+    *,
+    append: bool = False,
+) -> None:
+    """寫入已確認的人際關係：relations[稱呼] = [姓名, ...]。"""
+    rel = normalize_relation(relation)
+    val = (value or "").strip()
+    if not rel or not val:
+        return
+    uf = normalize_user_facts(session.user_facts)
+    if append:
+        uf["relations"][rel] = _merge_name_lists(uf["relations"].get(rel, []), [val])
+    else:
+        uf["relations"][rel] = _merge_name_lists([], [val])
+    session.user_facts = uf
+
+
+def append_relation_value(
+    session: SessionMemory,
+    relation: str,
+    value: str,
+) -> None:
+    """追加一名至既有關係（不覆寫其他人）。"""
+    merge_relation_fact(session, relation, value, append=True)
+
+
+def clear_relation_in_user_facts(
+    user_facts: dict[str, Any] | None,
+    relation: str,
+) -> dict[str, Any]:
+    """清空指定關係的姓名列表（自 relations 移除該鍵）。"""
+    uf = normalize_user_facts(user_facts)
+    rel = normalize_relation(relation)
+    if rel:
+        uf["relations"].pop(rel, None)
+    return uf
+
+
+def clear_relation_fact(session: SessionMemory, relation: str) -> None:
+    """Session 層級清空已確認的關係事實。"""
+    session.user_facts = clear_relation_in_user_facts(session.user_facts, relation)
+
+
+def remove_confirmed_fact_from_rolling_summary(session: SessionMemory, relation: str) -> None:
+    """移除 rolling_summary 中該關係的「使用者告知：{rel}為 …」行。"""
+    rel = normalize_relation(relation)
+    if not rel:
+        return
+    prefix = f"使用者告知：{rel}為"
+    existing = (session.rolling_summary or "").strip()
+    if not existing:
+        return
+    kept = [ln for ln in existing.split("\n") if not ln.strip().startswith(prefix)]
+    session.rolling_summary = "\n".join(kept).strip()
+
+
+def append_confirmed_fact_to_rolling_summary(
+    session: SessionMemory,
+    relation: str,
+    value: str | list[str] | None = None,
+) -> None:
+    """確認後立即寫入長期摘要，下一輪 pack_context 即可引用。"""
+    rel = normalize_relation(relation)
+    uf = normalize_user_facts(session.user_facts)
+    names = _coerce_relation_names(value) if value is not None else list(uf["relations"].get(rel) or [])
+    if not names:
+        return
+    label = format_relation_names(names)
+    line = f"使用者告知：{rel}為 {label}。"
+    existing = (session.rolling_summary or "").strip()
+    if line in existing:
+        return
+    session.rolling_summary = f"{existing}\n{line}".strip() if existing else line
+
+
+def format_user_facts_block(user_facts: dict[str, Any] | None) -> str:
+    uf = normalize_user_facts(user_facts)
+    profile = uf.get("profile") or {}
+    relations: dict[str, list[str]] = uf.get("relations") or {}
+    if not profile and not relations:
+        return ""
+    lines = ["── 使用者告知的事實（已確認；回答關係／姓名問題請直接引用）", "使用者告知的事實："]
+    for rel, names in sorted(relations.items(), key=lambda x: x[0]):
+        lines.append(f"- {rel}：{format_relation_names(names)}")
+    for key, val in sorted(profile.items(), key=lambda x: x[0]):
+        lines.append(f"- {key}：{val}")
+    return "\n".join(lines)
+
+
 def format_long_term_memory_block(session: SessionMemory, *, max_summary_chars: int = 8000) -> str:
     """【長期記憶】= 使用者基本資料 + 對話長期摘要。"""
     lines: list[str] = ["【長期記憶】"]
@@ -177,6 +390,9 @@ def format_long_term_memory_block(session: SessionMemory, *, max_summary_chars: 
         if name:
             lines.append(f"display_name={name}")
         lines.append(f"assistant_name={prof.get('assistant_name') or _ASSISTANT_NAME}")
+    facts_block = format_user_facts_block(session.user_facts)
+    if facts_block:
+        lines.append(facts_block)
     rs = (session.rolling_summary or "").strip()
     if rs:
         lines.append("── 對話長期摘要")

@@ -9,12 +9,14 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_ollama import ChatOllama
 
-from dual_agent.llm_json import coerce_llm_text, extract_json_object
+from dual_agent.llm_json import coerce_llm_text, invoke_and_parse_json
 from dual_agent.cai.planner_context import (
     apply_explicit_search_guard,
     apply_open_site_guard,
     collapse_redundant_search_web,
     dedupe_search_web_in_plan,
+    open_site_requested,
+    resolve_open_url_from_user_text,
     sanitize_search_web_query_string,
     strip_planner_system_prefix,
 )
@@ -35,6 +37,22 @@ def _sanitize_and_collapse_search_steps(todos: list[PlanStep]) -> list[PlanStep]
             out.append(PlanStep(skill="search_web", args={"query": q}))
     out = collapse_redundant_search_web(out)
     return dedupe_search_web_in_plan(out)
+
+
+def _planner_open_site_fallback(user_text: str) -> PlannerOutput | None:
+    """Planner JSON 解析失敗時，若為「打開 Google」等指令則 deterministic 降級。"""
+    intent = strip_planner_system_prefix((user_text or "").strip())
+    if not open_site_requested(intent):
+        return None
+    url = resolve_open_url_from_user_text(intent)
+    if not url:
+        return None
+    return PlannerOutput(
+        task_type="action",
+        task_state="running",
+        todos=[PlanStep(skill="open_url_readonly", args={"url": url})],
+        message="（Planner JSON 異常，已依規則開啟網站）",
+    )
 
 
 def invoke_planner(
@@ -65,6 +83,11 @@ def invoke_planner(
 
 【CAI 定位：任務導向 Agent（Task-Oriented）】
 - CAI **不是**通用聊天機器人；請避免長篇陪聊與無任務主題的閒談。
+當使用者表示「收到可疑簡訊、Email 或網址」時，請先檢查使用者是否已經貼出實際內容。
+
+若無內容 (缺乏 Payload)： 絕對不可呼叫防禦掃描工具。你必須將狀態改為 waiting_input，並回覆使用者：「請把完整的簡訊內容或截圖文字貼上來給我看看，我幫你分析有沒有危險。」
+
+若有內容： 將實際的簡訊內容放入 artifact 參數中，並呼叫防禦管線工具。
 - **`direct_response`**：**不是**「開放式聊天」代名詞；它表示「**本輪不需工具、不進 Executor**，仍屬**可交付的對答任務**」，由後續 Replan 產出**簡短**回答。
 - 若使用者話題與可執行任務無關（例如「你喜歡吃什麼」）：請 **`todos=[]`**、`task_type=direct_response`，並在 **`message`** 說明：禮貌一句＋**引導提出任務**（如協助檢視內容風險、查資料、開連結、整理重點），**不要**像一般 chatbot 延伸閒聊。
 
@@ -153,17 +176,39 @@ task_type 必須為以下之一：**direct_response** | **action** | **check** |
         if pending_review
         else "false"
     )
-    raw = (prompt | llm | StrOutputParser()).invoke(
-        {
-            "user": user_text.strip(),
-            "source_turn": source_turn_display or "（無）",
-            "pending_review_note": pending_note,
-            "tool_catalog_json": catalog_json,
-            "context_pack": (context_pack or "").strip() or "（無）",
-            "ingress_summary": (ingress_summary or "").strip() or "（無）",
-        }
-    )
-    obj = extract_json_object(raw)
+    chain = prompt | llm | StrOutputParser()
+    inputs = {
+        "user": user_text.strip(),
+        "source_turn": source_turn_display or "（無）",
+        "pending_review_note": pending_note,
+        "tool_catalog_json": catalog_json,
+        "context_pack": (context_pack or "").strip() or "（無）",
+        "ingress_summary": (ingress_summary or "").strip() or "（無）",
+    }
+
+    def _invoke() -> str:
+        return chain.invoke(inputs)
+
+    def _retry_invoke() -> str:
+        retry_prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    "你剛才沒有輸出合法 JSON。請只輸出單一 JSON 物件，鍵名：task_type, task_state, todos, message。"
+                    "不要 markdown、不要註解。",
+                ),
+                ("human", "{user}"),
+            ]
+        )
+        return (retry_prompt | llm | StrOutputParser()).invoke({"user": user_text.strip()})
+
+    try:
+        obj = invoke_and_parse_json(_invoke, retry_invoke=_retry_invoke)
+    except ValueError:
+        fb = _planner_open_site_fallback(source_turn_display)
+        if fb is not None:
+            return fb
+        raise
 
     task_type = normalize_task_type(coerce_llm_text(obj.get("task_type")))
     task_state = coerce_llm_text(obj.get("task_state")).lower() or "new"

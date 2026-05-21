@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from dual_agent.dai.schemas import DAIResult, DefenseObservation
+from dual_agent.dai.schemas import DAIResult, DefenseObservation, DefensePlan
 
 
 def risk_report_to_dai_payload(report: dict[str, Any]) -> dict[str, Any]:
@@ -18,6 +18,9 @@ def risk_report_to_dai_payload(report: dict[str, Any]) -> dict[str, Any]:
         "component_scores": dict(report.get("component_scores") or {}),
         "evidence": list(report.get("evidence") or []),
         "reason_highlights": list(report.get("reason_highlights") or []),
+        "user_reason_highlights": list(report.get("user_reason_highlights") or []),
+        "user_suggestions": list(report.get("user_suggestions") or []),
+        "display_text": str(report.get("display_text") or ""),
         "track_a": dict(report.get("track_a") or {}),
         "risk_labels": list(report.get("labels") or []),
         "safety_summary": str(report.get("safety_summary") or ""),
@@ -37,6 +40,37 @@ def risk_report_to_dai_payload(report: dict[str, Any]) -> dict[str, Any]:
         "gate_tier": report.get("gate_tier"),
         "error": None,
     }
+
+
+def dai_result_from_sms_defense(
+    plan: DefensePlan,
+    report: dict[str, Any],
+    observations: list[DefenseObservation],
+    *,
+    llm_turns: int = 1,
+    error: str | None = None,
+) -> DAIResult:
+    """簡訊審查：Defense 計畫 + DAG 報告 → DAIResult。"""
+    exec_ok = all(o.ok for o in observations) if observations else True
+    risk_score = max(int(plan.risk_score), int(report.get("risk_score") or 0))
+    safety = str(report.get("safety_summary") or plan.safety_summary or "").strip()
+    if not safety:
+        safety = "簡訊審查已完成。" if exec_ok else "簡訊審查執行未完成。"
+    labels = list(report.get("labels") or plan.risk_labels or [])
+    evidence = list(report.get("evidence") or plan.evidence or [])
+    action = str(report.get("recommended_cai_action") or plan.recommended_cai_action or "continue")
+    return DAIResult(
+        ok=exec_ok and not error,
+        risk_score=risk_score,
+        risk_labels=labels,
+        safety_summary=safety,
+        evidence=evidence,
+        tool_restrictions=dict(plan.tool_restrictions),
+        recommended_cai_action=action,  # type: ignore[arg-type]
+        defense_observations=list(observations),
+        defense_llm_turns=llm_turns,
+        error=error,
+    )
 
 
 def dai_result_from_risk_report(report: dict[str, Any]) -> DAIResult:
