@@ -157,7 +157,7 @@ def handle(args: dict[str, Any], ctx: SkillContext) -> SkillResult:
         source=review_source or "desktop",
     )
     try:
-        out = invoke_dai(req)
+        out = invoke_dai(req, pipeline_ctx=ctx)
     except Exception as e:  # noqa: BLE001
         return SkillResult(
             ok=False,

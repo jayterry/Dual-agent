@@ -59,6 +59,7 @@ def run_sms_review_dag(
     pipe: DefensePipelineContext,
     *,
     use_skill_registry: bool = False,
+    pipeline_ctx: SkillContext | None = None,
 ) -> tuple[dict[str, Any], list[DefenseObservation]]:
     """
     固定 DAG。use_skill_registry=True 時改走 skills_registry（測試 catalog 隔離用）。
@@ -69,6 +70,10 @@ def run_sms_review_dag(
         policy_state={"dai_pipeline": pipe},
     )
     for step_name in SMS_REVIEW_DAG:
+        if pipeline_ctx is not None:
+            from dual_agent.cai.pipeline_progress import advance_dai_step
+
+            advance_dai_step(pipeline_ctx, step_name, model=pipe.model)
         if use_skill_registry:
             from dual_agent.skills_registry import run_dai_skill
 

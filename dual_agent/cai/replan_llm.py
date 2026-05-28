@@ -11,7 +11,9 @@ from langchain_ollama import ChatOllama
 
 from dual_agent.llm_json import coerce_llm_bool, coerce_llm_text, invoke_and_parse_json
 from dual_agent.cai.planner_context import post_process_replan_todos
+from dual_agent.cai.pipeline_progress import advance_pipeline_node
 from dual_agent.cai.schemas import PlanStep, ReplanOutput
+from dual_agent.skill_types import SkillContext
 
 
 def invoke_replan(
@@ -27,7 +29,10 @@ def invoke_replan(
     temperature: float = 0.2,
     context_pack: str | None = None,
     pending_review: bool = False,
+    pipeline_ctx: SkillContext | None = None,
 ) -> ReplanOutput:
+    if pipeline_ctx is not None:
+        advance_pipeline_node(pipeline_ctx, "replan_llm", model=model)
     llm = ChatOllama(model=model, base_url=base_url, temperature=temperature)
 
     def _todo_json(steps: list[PlanStep]) -> str:

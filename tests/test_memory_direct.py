@@ -25,6 +25,7 @@ from dual_agent.cai.memory_direct import (
     try_recall_empty_relation,
     try_recall_from_user_facts,
 )
+from dual_agent.cai.memory_manager.schemas import MemoryDecision
 from dual_agent.cai.plan_execute import run_plan_and_execute
 from dual_agent.cai.planner_validate import _pending_review_followup_should_drop_dai
 from dual_agent.skill_types import SkillContext
@@ -164,8 +165,20 @@ def test_plan_execute_clears_pending_review_on_memory() -> None:
         {"relations": {"專題組員": ["ruby", "David"]}}
     )
     planner = MagicMock()
+
+    def fake_memory_llm(user_text: str, *_a: object, **_k: object) -> MemoryDecision:
+        return MemoryDecision(
+            intent="recall",
+            relation="專題組員",
+            confidence=0.9,
+        )
+
     with patch("dual_agent.cai.plan_execute.invoke_planner", planner):
-        out = run_plan_and_execute(user_text="我有兩個組員", ctx=ctx)
+        with patch(
+            "dual_agent.cai.memory_manager.manager.invoke_memory_turn_llm",
+            fake_memory_llm,
+        ):
+            out = run_plan_and_execute(user_text="我有兩個組員", ctx=ctx)
     planner.assert_not_called()
     assert not ctx.policy_state.get("pending_review")
     assert "ruby" in out.answer and "David" in out.answer
@@ -210,14 +223,23 @@ def test_forget_not_recalled_as_two_members() -> None:
 def test_ossa_additive_confirm_question() -> None:
     ctx = SkillContext(user_input="")
     ctx.policy_state["user_facts"] = normalize_user_facts({"relations": {"專題組員": ["ruby"]}})
+
+    def fake_memory_llm(user_text: str, *_a: object, **_k: object) -> MemoryDecision:
+        return MemoryDecision(
+            intent="remember_append",
+            relation="專題組員",
+            value="Ossa",
+            mode="append",
+            confidence=0.9,
+        )
+
     out = try_handle_memory_turn(
         "還有一個人，就Ossa",
         ctx=ctx,
         user_facts=ctx.policy_state["user_facts"],
         model="mock",
         base_url="http://localhost",
-        parse_fn=lambda *_a, **_k: None,
-        recall_fn=lambda *_a, **_k: None,
+        memory_llm_fn=fake_memory_llm,
     )
     assert out is not None
     assert "Ossa" in out.answer
@@ -230,8 +252,16 @@ def test_empty_recall_no_planner() -> None:
     ctx = SkillContext(user_input="")
     ctx.policy_state["user_facts"] = default_user_facts()
     planner = MagicMock()
+
+    def fake_memory_llm(user_text: str, *_a: object, **_k: object) -> MemoryDecision:
+        return MemoryDecision(intent="recall", relation="專題組員", confidence=0.9)
+
     with patch("dual_agent.cai.plan_execute.invoke_planner", planner):
-        out = run_plan_and_execute(user_text="我的專題組員現在有誰", ctx=ctx)
+        with patch(
+            "dual_agent.cai.memory_manager.manager.invoke_memory_turn_llm",
+            fake_memory_llm,
+        ):
+            out = run_plan_and_execute(user_text="我的專題組員現在有誰", ctx=ctx)
     planner.assert_not_called()
     assert "尚未記錄" in out.answer
 
@@ -263,3 +293,178 @@ def test_after_forget_empty_recall() -> None:
         recall_fn=lambda *_a, **_k: None,
     )
     assert out and "尚未記錄" in out.answer
+
+
+# --- Memory Manager LLM（七則 mock，規格第十節）---
+
+
+def test_mm_mom_then_brother_not_mom_zack() -> None:
+    """已知媽媽=mei，再說哥哥 zack → pending 哥哥/set，不得媽媽叫 zack。"""
+    ctx = SkillContext(user_input="")
+    ctx.policy_state["user_facts"] = normalize_user_facts({"relations": {"媽媽": ["mei"]}})
+
+    def fake_memory_llm(user_text: str, *_a: object, **_k: object) -> MemoryDecision:
+        if "zack" in user_text.lower():
+            return MemoryDecision(
+                intent="remember_set",
+                relation="哥哥",
+                value="zack",
+                mode="set",
+                confidence=0.9,
+            )
+        return MemoryDecision(intent="none")
+
+    out = try_handle_memory_turn(
+        "哥哥叫 zack",
+        ctx=ctx,
+        user_facts=ctx.policy_state["user_facts"],
+        model="mock",
+        base_url="http://localhost",
+        memory_llm_fn=fake_memory_llm,
+    )
+    assert out is not None
+    assert "哥哥" in out.answer
+    assert "zack" in out.answer.lower()
+    assert "媽媽" not in out.answer or "媽媽叫 zack" not in out.answer
+    pending = ctx.policy_state.get("pending_memory_confirm") or {}
+    assert pending.get("relation") == "哥哥"
+    assert pending.get("mode") == "set"
+
+
+def test_mm_brother_slang_ge() -> None:
+    ctx = SkillContext(user_input="")
+    ctx.policy_state["user_facts"] = default_user_facts()
+
+    def fake_memory_llm(user_text: str, *_a: object, **_k: object) -> MemoryDecision:
+        return MemoryDecision(
+            intent="remember_set",
+            relation="哥哥",
+            raw_relation="我哥",
+            value="zack",
+            mode="set",
+            confidence=0.9,
+        )
+
+    out = try_handle_memory_turn(
+        "我哥叫 zack",
+        ctx=ctx,
+        user_facts=ctx.policy_state["user_facts"],
+        model="mock",
+        base_url="http://localhost",
+        memory_llm_fn=fake_memory_llm,
+    )
+    pending = ctx.policy_state.get("pending_memory_confirm") or {}
+    assert out is not None
+    assert pending.get("relation") == "哥哥"
+
+
+def test_mm_ruby_then_david_append() -> None:
+    ctx = SkillContext(user_input="")
+    ctx.policy_state["user_facts"] = normalize_user_facts({"relations": {"專題組員": ["ruby"]}})
+
+    def fake_memory_llm(user_text: str, *_a: object, **_k: object) -> MemoryDecision:
+        if "david" in user_text.lower():
+            return MemoryDecision(
+                intent="remember_append",
+                relation="專題組員",
+                value="David",
+                mode="append",
+                confidence=0.9,
+            )
+        return MemoryDecision(intent="none")
+
+    out = try_handle_memory_turn(
+        "還有 David",
+        ctx=ctx,
+        user_facts=ctx.policy_state["user_facts"],
+        model="mock",
+        base_url="http://localhost",
+        memory_llm_fn=fake_memory_llm,
+    )
+    pending = ctx.policy_state.get("pending_memory_confirm") or {}
+    assert pending.get("mode") == "append"
+    assert pending.get("value") == "David"
+
+
+def test_mm_append_without_relation_clarify() -> None:
+    ctx = SkillContext(user_input="")
+    ctx.policy_state["user_facts"] = normalize_user_facts(
+        {"relations": {"媽媽": ["mei"], "專題組員": ["ruby"]}}
+    )
+
+    def fake_memory_llm(user_text: str, *_a: object, **_k: object) -> MemoryDecision:
+        return MemoryDecision(
+            intent="clarify",
+            answer="請問要記在哪一種關係底下？",
+            confidence=0.5,
+        )
+
+    out = try_handle_memory_turn(
+        "還有 David",
+        ctx=ctx,
+        user_facts=ctx.policy_state["user_facts"],
+        model="mock",
+        base_url="http://localhost",
+        memory_llm_fn=fake_memory_llm,
+    )
+    assert out is not None
+    assert not ctx.policy_state.get("pending_memory_confirm")
+    assert "關係" in out.answer or "記" in out.answer
+
+
+def test_mm_forget_project_members() -> None:
+    ctx = SkillContext(user_input="")
+    ctx.policy_state["user_facts"] = normalize_user_facts(
+        {"relations": {"專題組員": ["ruby", "David"]}}
+    )
+
+    def fake_memory_llm(user_text: str, *_a: object, **_k: object) -> MemoryDecision:
+        return MemoryDecision(intent="forget", relation="專題組員", confidence=0.9)
+
+    out = try_handle_memory_turn(
+        "忘記專題組員",
+        ctx=ctx,
+        user_facts=ctx.policy_state["user_facts"],
+        model="mock",
+        base_url="http://localhost",
+        memory_llm_fn=fake_memory_llm,
+    )
+    assert out and "忘記" in out.answer
+    assert not normalize_user_facts(ctx.policy_state["user_facts"])["relations"].get("專題組員")
+
+
+def test_mm_empty_mom_recall_no_new_member_wording() -> None:
+    ctx = SkillContext(user_input="")
+    ctx.policy_state["user_facts"] = default_user_facts()
+
+    def fake_memory_llm(user_text: str, *_a: object, **_k: object) -> MemoryDecision:
+        return MemoryDecision(intent="recall", relation="媽媽", confidence=0.9)
+
+    out = try_handle_memory_turn(
+        "媽媽叫什麼",
+        ctx=ctx,
+        user_facts=ctx.policy_state["user_facts"],
+        model="mock",
+        base_url="http://localhost",
+        memory_llm_fn=fake_memory_llm,
+    )
+    assert out and "尚未記錄" in out.answer
+    assert "新組員" not in out.answer
+
+
+def test_mm_weather_returns_none() -> None:
+    ctx = SkillContext(user_input="")
+    ctx.policy_state["user_facts"] = default_user_facts()
+
+    def fake_memory_llm(user_text: str, *_a: object, **_k: object) -> MemoryDecision:
+        return MemoryDecision(intent="none", confidence=0.0)
+
+    out = try_handle_memory_turn(
+        "今天天氣如何",
+        ctx=ctx,
+        user_facts=ctx.policy_state["user_facts"],
+        model="mock",
+        base_url="http://localhost",
+        memory_llm_fn=fake_memory_llm,
+    )
+    assert out is None

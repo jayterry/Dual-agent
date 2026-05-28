@@ -11,6 +11,7 @@ from dual_agent.dai.defense_execute import (
 from dual_agent.dai.defense_llm import invoke_defense_replan, invoke_defense_review_sms_plan
 from dual_agent.dai.risk_analysis.reporting import dai_result_from_sms_defense
 from dual_agent.dai.schemas import DAIRequest, DAIResult, DefenseObservation
+from dual_agent.skill_types import SkillContext
 
 
 def _invoke_dai_sms_review(
@@ -20,21 +21,25 @@ def _invoke_dai_sms_review(
     base_url: str | None,
     temperature: float,
     source: str | None = None,
+    pipeline_ctx: SkillContext | None = None,
 ) -> DAIResult:
     """簡訊審查：Defense LLM 規劃 → 固定 DAG（dai/skills）→ DAIResult。"""
     m = model if model is not None else OLLAMA_MODEL
     u = base_url if base_url is not None else OLLAMA_BASE_URL
     src = (source or req.source or "desktop").strip() or "desktop"
     try:
+        from dual_agent.cai.pipeline_progress import advance_pipeline_node
         from dual_agent.dai.executor import build_pipeline_context, run_sms_review_dag
 
+        if pipeline_ctx is not None:
+            advance_pipeline_node(pipeline_ctx, "dai_defense_llm", model=m)
         plan = invoke_defense_review_sms_plan(
             req, model=m, base_url=u, temperature=temperature
         )
         pipe = build_pipeline_context(
             req, model=m, base_url=u, temperature=temperature, source=src
         )
-        report, observations = run_sms_review_dag(pipe)
+        report, observations = run_sms_review_dag(pipe, pipeline_ctx=pipeline_ctx)
         if not report:
             return DAIResult(
                 ok=False,
@@ -72,6 +77,7 @@ def invoke_dai(
     model: str | None = None,
     base_url: str | None = None,
     temperature: float = 0.1,
+    pipeline_ctx: SkillContext | None = None,
 ) -> DAIResult:
     """
     DAI：
@@ -85,6 +91,7 @@ def invoke_dai(
             base_url=base_url,
             temperature=temperature,
             source=(req.source or None),
+            pipeline_ctx=pipeline_ctx,
         )
 
     m = model if model is not None else OLLAMA_MODEL

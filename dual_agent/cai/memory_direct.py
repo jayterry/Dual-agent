@@ -255,7 +255,7 @@ def try_recall_empty_relation(user_text: str, user_facts: dict[str, Any] | None)
     names = list((relations.get(rel) or []))
     if names:
         return None
-    return f"目前尚未記錄您的{rel}。若要記住新組員，請直接告訴我名字。"
+    return f"目前尚未記錄您的{rel}。若要記住，請直接告訴我稱呼或名字。"
 
 
 def looks_like_memory_clarification_turn(user_text: str) -> bool:
@@ -305,7 +305,11 @@ def build_confirm_question(
 
 
 def try_parse_additive_name(user_text: str) -> str | None:
-    """「還有 David」→ 僅回傳姓名（不含 relation）。"""
+    """
+    .. deprecated::
+        主路徑已改為 Memory Manager LLM；僅供單元測試或極簡 fallback。
+    「還有 David」→ 僅回傳姓名（不含 relation）。
+    """
     t = (user_text or "").strip()
     if not t:
         return None
@@ -325,7 +329,11 @@ def infer_relation_for_additive(
     user_facts: dict[str, Any] | None,
     user_text: str,
 ) -> str | None:
-    """追加時若僅有一種關係已記住，或句中含該稱呼，則推斷 relation。"""
+    """
+    .. deprecated::
+        單關係 fallback 已下架；語意推斷由 Memory Manager LLM 負責。
+    追加時若僅有一種關係已記住，或句中含該稱呼，則推斷 relation。
+    """
     uf = normalize_user_facts(user_facts)
     relations: dict[str, list[str]] = dict(uf.get("relations") or {})
     if not relations:
@@ -351,23 +359,15 @@ def parse_relation_memory_statement(
     user_facts: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """
+    .. deprecated::
+        主路徑已改為 ``memory_manager.invoke_memory_turn_llm``。
+        僅供舊測試 ``parse_fn`` 相容或極簡 fallback，勿在 Pre-Planner 主流程呼叫。
     從使用者陳述抽取待確認的關係事實。
     命中回傳：{"fact_type": "relation", "relation": "媽媽", "value": "Yuri", "mode": "set"|"append"}
     """
     text = (user_text or "").strip()
     if not text or len(text) > 500:
         return None
-
-    additive_name = try_parse_additive_name(text)
-    if additive_name:
-        rel = infer_relation_for_additive(user_facts, text)
-        if rel:
-            return {
-                "fact_type": "relation",
-                "relation": rel,
-                "value": additive_name,
-                "mode": "append",
-            }
 
     alias_hint = "、".join(sorted(set(RELATION_ALIASES.keys())))
     prompt = ChatPromptTemplate.from_messages(
@@ -585,6 +585,10 @@ def _recall_fact_llm(
     base_url: str,
     temperature: float,
 ) -> str | None:
+    """
+    .. deprecated::
+        回想語意已併入 ``memory_manager.invoke_memory_turn_llm``（intent=recall）。
+    """
     uf = normalize_user_facts(user_facts)
     relations: dict[str, list[str]] = dict(uf.get("relations") or {})
     if not relations:
@@ -683,224 +687,31 @@ def try_handle_memory_turn(
     *,
     ctx: SkillContext,
     user_facts: dict[str, Any] | None,
-    model: str,
-    base_url: str,
-    temperature: float = 0.2,
+    model: str | None = None,
+    base_url: str | None = None,
+    temperature: float = 0.0,
+    memory_llm_fn: Any = None,
     parse_fn: Any = None,
     classify_fn: Any = None,
     recall_fn: Any = None,
+    context_pack: str | None = None,
 ) -> PlanExecuteOutcome | None:
     """
     記憶確認短路：命中則回 PlanExecuteOutcome，否則 None（交給 Planner）。
+    實作委託 ``memory_manager.handle_memory_turn``；未傳 model 時用 ``cai_memory_model()``（預設 3b）。
     """
-    uf = normalize_user_facts(user_facts)
-    if not isinstance(ctx.policy_state.get("user_facts"), dict):
-        ctx.policy_state["user_facts"] = normalize_user_facts(uf)
-    else:
-        uf = normalize_user_facts(ctx.policy_state.get("user_facts"))
+    from dual_agent.cai.memory_manager.manager import handle_memory_turn
 
-    _parse = parse_fn or parse_relation_memory_statement
-    _classify = classify_fn or _classify_memory_reply_llm
-    _recall_llm = recall_fn or _recall_fact_llm
-
-    pending = ctx.policy_state.get("pending_memory_confirm")
-    if isinstance(pending, dict) and pending.get("value"):
-        relation = str(pending.get("relation") or "").strip()
-        value = str(pending["value"])
-        mode = str(pending.get("mode") or "set").strip().lower()
-        if not relation and pending.get("fact_key"):
-            relation = normalize_relation(str(pending["fact_key"]))
-        if relation:
-            question = str(
-                pending.get("question")
-                or build_confirm_question(relation, value, mode=mode)
-            )
-            if is_affirmative_reply(user_text):
-                intent = "affirm"
-            elif is_deny_reply(user_text):
-                intent = "deny"
-            else:
-                intent = _classify(
-                    user_text,
-                    pending_question=question,
-                    relation=relation,
-                    value=value,
-                    model=model,
-                    base_url=base_url,
-                    temperature=temperature,
-                )
-            if intent == "affirm":
-                ctx.policy_state["user_facts"] = _apply_confirmed_relation(
-                    ctx.policy_state.get("user_facts"),
-                    relation,
-                    value,
-                    mode=mode,
-                )
-                _clear_pending_memory(ctx)
-                ctx.policy_state.pop("pending_review", None)
-                rel = normalize_relation(relation)
-                names = get_relation_names(ctx.policy_state.get("user_facts"), rel)
-                label = format_relation_names(names)
-                if mode == "append" and len(names) > 1:
-                    return _outcome(
-                        f"好的，已記住。您的{rel}有 {label}。",
-                        task_state="completed",
-                    )
-                return _outcome(
-                    f"好的，已記住您的{rel}是 {label}。",
-                    task_state="completed",
-                )
-            if intent == "deny":
-                _clear_pending_memory(ctx)
-                return _outcome(
-                    "了解，那我先不記這筆。請再告訴我正確的稱呼或關係。",
-                    task_state="waiting_input",
-                )
-            return None
-
-    if looks_like_forget_memory_turn(user_text):
-        rel = infer_relation_for_forget(uf, user_text)
-        relations_now: dict[str, list[str]] = dict(uf.get("relations") or {})
-        if not rel and relations_now:
-            if len(relations_now) == 1:
-                rel = next(iter(relations_now))
-            else:
-                return _outcome(
-                    "請告訴我要忘記哪一種關係（例如專題組員、媽媽）。",
-                    task_state="waiting_input",
-                )
-        if rel:
-            ctx.policy_state["user_facts"] = clear_relation_in_user_facts(
-                ctx.policy_state.get("user_facts"),
-                rel,
-            )
-            _clear_pending_memory(ctx)
-            ctx.policy_state.pop("pending_review", None)
-            rel_label = normalize_relation(rel)
-            return _outcome(
-                f"好的，已忘記您先前記錄的{rel_label}。若要記住新的成員，請直接告訴我名字。",
-                task_state="completed",
-            )
-        return _outcome(
-            "目前沒有已記錄的人際關係可忘記。",
-            task_state="completed",
-        )
-
-    empty_recall = try_recall_empty_relation(user_text, uf)
-    if empty_recall:
-        ctx.policy_state.pop("pending_review", None)
-        return _outcome(empty_recall, task_state="completed")
-
-    recalled = try_recall_from_user_facts(user_text, uf)
-    if recalled:
-        ctx.policy_state.pop("pending_review", None)
-        return _outcome(recalled, task_state="completed")
-
-    if looks_like_memory_clarification_turn(user_text):
-        if relations := dict(uf.get("relations") or {}):
-            if len(relations) == 1:
-                rel = next(iter(relations))
-                names = relations[rel]
-                if names:
-                    ctx.policy_state.pop("pending_review", None)
-                    return _outcome(_format_recall_answer(rel, names), task_state="completed")
-
-    additive_name_hint = try_parse_additive_name(user_text)
-    if additive_name_hint:
-        additive_parsed = _parse(
-            user_text,
-            model=model,
-            base_url=base_url,
-            temperature=temperature,
-            user_facts=uf,
-        )
-        if not additive_parsed or additive_parsed.get("fact_type") != "relation":
-            rel_hint = infer_relation_for_additive(uf, user_text)
-            if rel_hint:
-                additive_parsed = {
-                    "fact_type": "relation",
-                    "relation": rel_hint,
-                    "value": additive_name_hint,
-                    "mode": "append",
-                }
-        if additive_parsed and additive_parsed.get("fact_type") == "relation":
-            relation = str(additive_parsed.get("relation") or "")
-            value = str(additive_parsed.get("value") or "")
-            mode = str(additive_parsed.get("mode") or "append").strip().lower()
-            if mode not in ("set", "append"):
-                mode = "append"
-            if relation and value:
-                existing = get_relation_names(uf, relation) if mode == "append" else []
-                question = build_confirm_question(
-                    relation,
-                    value,
-                    existing_names=existing,
-                    mode=mode,
-                )
-                ctx.policy_state["pending_memory_confirm"] = {
-                    "fact_type": "relation",
-                    "relation": normalize_relation(relation),
-                    "value": value,
-                    "mode": mode,
-                    "question": question,
-                }
-                ctx.policy_state["pending_task"] = {
-                    "type": "ask_user",
-                    "question": question,
-                    "rationale": "確認使用者告知的關係事實後再寫入記憶",
-                    "expected_task": "direct_response",
-                }
-                ctx.policy_state["pending_user_question"] = question
-                return _outcome(question, task_state="waiting_input")
-
-    recalled_llm = _recall_llm(
+    _ = recall_fn  # 舊參數保留相容；回想已併入 Memory Manager LLM
+    return handle_memory_turn(
         user_text,
-        user_facts=uf,
+        ctx=ctx,
+        user_facts=user_facts,
         model=model,
         base_url=base_url,
         temperature=temperature,
+        memory_llm_fn=memory_llm_fn,
+        parse_fn=parse_fn,
+        classify_fn=classify_fn,
+        context_pack=context_pack,
     )
-    if recalled_llm:
-        ctx.policy_state.pop("pending_review", None)
-        return _outcome(recalled_llm, task_state="completed")
-
-    parsed = _parse(
-        user_text,
-        model=model,
-        base_url=base_url,
-        temperature=temperature,
-        user_facts=uf,
-    )
-    if not parsed or parsed.get("fact_type") != "relation":
-        return None
-
-    relation = str(parsed.get("relation") or "")
-    value = str(parsed.get("value") or "")
-    mode = str(parsed.get("mode") or "set").strip().lower()
-    if mode not in ("set", "append"):
-        mode = "set"
-    if not relation or not value:
-        return None
-
-    existing = get_relation_names(uf, relation) if mode == "append" else []
-    question = build_confirm_question(
-        relation,
-        value,
-        existing_names=existing,
-        mode=mode,
-    )
-    ctx.policy_state["pending_memory_confirm"] = {
-        "fact_type": "relation",
-        "relation": normalize_relation(relation),
-        "value": value,
-        "mode": mode,
-        "question": question,
-    }
-    ctx.policy_state["pending_task"] = {
-        "type": "ask_user",
-        "question": question,
-        "rationale": "確認使用者告知的關係事實後再寫入記憶",
-        "expected_task": "direct_response",
-    }
-    ctx.policy_state["pending_user_question"] = question
-    return _outcome(question, task_state="waiting_input")

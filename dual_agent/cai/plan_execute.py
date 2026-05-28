@@ -14,11 +14,18 @@ import json
 import re
 from typing import Any
 
-from dual_agent.config import OLLAMA_BASE_URL, OLLAMA_MODEL, max_executor_steps, max_replan_iterations
+from dual_agent.config import (
+    OLLAMA_BASE_URL,
+    OLLAMA_MODEL,
+    cai_memory_model,
+    max_executor_steps,
+    max_replan_iterations,
+)
 from dual_agent.cai.executor import execute_step, format_results_for_display
 from dual_agent.cai.context_layer import normalize_user_facts
 from dual_agent.cai.follow_up_direct import is_pure_identity_turn, try_follow_up_direct_answer
 from dual_agent.cai.memory_direct import try_handle_memory_turn
+from dual_agent.cai.pipeline_progress import clear_pipeline_stage, set_pipeline_stage
 from dual_agent.cai.planner_llm import invoke_planner
 from dual_agent.cai.planner_validate import validate_planner_output
 from dual_agent.cai.replan_llm import invoke_replan
@@ -165,8 +172,31 @@ def _direct_review_ask_user(ctx: SkillContext, ingress: IngressPayload) -> PlanE
 
 
 def _pending_review_should_promote_raw_input(ingress: IngressPayload) -> bool:
-    """僅對明確標記之威脅候補自動把本輪原句晉升为 artifact（其餘交 Planner／validate）。"""
-    return bool((ingress.metadata or {}).get("threat_review_candidate"))
+    """待審缺正文時，使用者補上實質內容（含轉述威脅）則晉升為 artifact。"""
+    if bool((ingress.metadata or {}).get("threat_review_candidate")):
+        return True
+    raw = (ingress.raw_input_text or "").strip()
+    if not raw:
+        return False
+    from dual_agent.cai.review_entry_eligibility import artifact_meta_only_for_dai
+    from dual_agent.cai.skills.call_dai.handler import artifact_is_meta_only_intent
+    from dual_agent.ingress import (
+        _looks_like_threat_review_body,
+        _threat_term_hits,
+        extract_entities,
+        has_substantive_review_signals,
+    )
+
+    if artifact_meta_only_for_dai(raw) or artifact_is_meta_only_intent(raw):
+        return False
+    ents = ingress.entities if getattr(ingress, "entities", None) else extract_entities(raw)
+    if _looks_like_threat_review_body(raw, ents):
+        return True
+    if has_substantive_review_signals(raw, ents):
+        return True
+    if _threat_term_hits(raw) and len(raw) >= 4:
+        return True
+    return False
 
 
 def _coerce_pending_review_artifact(ingress: IngressPayload) -> IngressPayload:
@@ -202,6 +232,25 @@ def _direct_review_call_dai_plan(ingress: IngressPayload, context_pack: str | No
 
 
 _STOPPED_REPLAN_MSG = "（已停止：待辦已空但 Replan 未標記完成。）"
+_USER_REPLAN_FALLBACK_ZH = (
+    "我這邊處理到一半時狀態不一致，請再試一次。"
+    "若你在補充簡訊內容，請直接貼上完整原文。"
+)
+_REPLAN_INTERNAL_MARKERS = (
+    "待辦已空但 Replan",
+    "Replan 未產生總結",
+    "Replan 未標記完成",
+)
+
+
+def _user_visible_answer(answer: str) -> str:
+    """勿將 Replan 內部狀態字串直接顯示給使用者。"""
+    fa = (answer or "").strip()
+    if not fa:
+        return fa
+    if any(m in fa for m in _REPLAN_INTERNAL_MARKERS) or fa == _STOPPED_REPLAN_MSG:
+        return _USER_REPLAN_FALLBACK_ZH
+    return fa
 
 
 def _format_answer_from_dai(dai: dict[str, Any]) -> str:
@@ -366,7 +415,7 @@ def _outcome_with_deterministic_answer(
     return PlanExecuteOutcome(
         plan=_out_plan(initial_plan, executed_trace),
         results=results,
-        answer=fa or _STOPPED_REPLAN_MSG,
+        answer=_user_visible_answer(fa or _STOPPED_REPLAN_MSG),
         task_type=task_type,
         task_state=task_state,
     )
@@ -395,6 +444,10 @@ def _run_replan_loop(
     exec_cap = max_executor_steps()
     replan_count = 0
     last_ro: ReplanOutput | None = None
+    pipe_raw = ctx.policy_state.get("pipeline") or {}
+    flow = str(pipe_raw.get("flow") if isinstance(pipe_raw, dict) else "chat")
+    if flow not in ("chat", "review"):
+        flow = "chat"
     while replan_count < cap:
         if todos:
             if len(results) >= exec_cap:
@@ -403,6 +456,7 @@ def _run_replan_loop(
                     f"\n\n【系統】本回合已執行 {exec_cap} 次工具，不得再執行。"
                     "請設 complete=true，用 final_answer 依上方紀錄總結回答使用者；updated_todos=[]。"
                 )
+                set_pipeline_stage(ctx, flow=flow, stage="replan", model=model)  # type: ignore[arg-type]
                 ro = invoke_replan(
                     user_text=normalized_turn,
                     task_type=task_type,
@@ -415,6 +469,7 @@ def _run_replan_loop(
                     temperature=temperature,
                     context_pack=context_pack,
                     pending_review=active_pending_review,
+                    pipeline_ctx=ctx,
                 )
                 last_ro = ro
                 replan_count += 1
@@ -458,6 +513,13 @@ def _run_replan_loop(
                 )
 
             st = todos[0]
+            set_pipeline_stage(
+                ctx,
+                flow=flow,  # type: ignore[arg-type]
+                stage="execute",
+                detail=st.skill,
+                model=model,
+            )
             executed_trace.append(PlanStep(skill=st.skill, args=dict(st.args)))
             if _call_dai_blocked_without_artifact(st, ctx):
                 ingress_dict = ctx.policy_state.get("ingress_payload") or {}
@@ -515,6 +577,12 @@ def _run_replan_loop(
             observation_log = "\n\n".join(observation_lines)
             todos = todos[1:]
 
+        set_pipeline_stage(
+            ctx,
+            flow=flow,  # type: ignore[arg-type]
+            stage="replan",
+            model=model,
+        )
         ro = invoke_replan(
             user_text=normalized_turn,
             task_type=task_type,
@@ -527,6 +595,7 @@ def _run_replan_loop(
             temperature=temperature,
             context_pack=context_pack,
             pending_review=active_pending_review,
+            pipeline_ctx=ctx,
         )
         last_ro = ro
         replan_count += 1
@@ -546,6 +615,8 @@ def _run_replan_loop(
             )
 
         if ro.complete:
+            if flow == "review":
+                set_pipeline_stage(ctx, flow="review", stage="finish")
             return PlanExecuteOutcome(
                 plan=_out_plan(initial_plan, executed_trace),
                 results=results,
@@ -558,6 +629,8 @@ def _run_replan_loop(
         if not todos:
             fa = (ro.final_answer or "").strip()
             if fa:
+                if flow == "review":
+                    set_pipeline_stage(ctx, flow="review", stage="finish")
                 return PlanExecuteOutcome(
                     plan=_out_plan(initial_plan, executed_trace),
                     results=results,
@@ -626,6 +699,7 @@ def run_dai_then_replan(
     if not art:
         return _direct_review_ask_user(ctx, ingress)
 
+    set_pipeline_stage(ctx, flow="review", stage="dai", model=model)
     _clear_pending_review(ctx)
     normalized_turn = _planner_source_turn_text(user_text, ingress)
     initial_plan, task_type, task_state = _direct_review_call_dai_plan(ingress, context_pack)
@@ -699,12 +773,14 @@ def run_plan_and_execute(
         ingress = _coerce_pending_review_artifact(ingress)
     ctx.policy_state["ingress_payload"] = ingress_payload_to_dict(ingress)
 
+    set_pipeline_stage(ctx, flow="chat", stage="ingress")
     snap = _task_snapshot_from_ctx(ctx) or {}
     normalized_turn = _planner_source_turn_text(user_text, ingress)
 
     if _should_direct_review_ask_user(ingress):
         return _direct_review_ask_user(ctx, ingress)
 
+    set_pipeline_stage(ctx, flow="chat", stage="memory", model=cai_memory_model())
     user_facts = normalize_user_facts(
         ctx.policy_state.get("user_facts") if isinstance(ctx.policy_state.get("user_facts"), dict) else None
     )
@@ -712,9 +788,10 @@ def run_plan_and_execute(
         normalized_turn,
         ctx=ctx,
         user_facts=user_facts,
-        model=model,
+        model=cai_memory_model(),
         base_url=base_url,
-        temperature=temperature,
+        temperature=0.0,
+        context_pack=context_pack,
     )
     if mem_out is not None:
         ctx.policy_state.pop("pending_review", None)
@@ -727,6 +804,7 @@ def run_plan_and_execute(
 
     payload = _planner_payload(user_text, ctx)
 
+    set_pipeline_stage(ctx, flow="chat", stage="planner", model=model)
     ingress_requires_dai = bool(ingress.requires_dai)
     review_pending_candidate = bool((ingress.metadata or {}).get("review_pending_candidate"))
 
@@ -745,6 +823,7 @@ def run_plan_and_execute(
         task_snapshot=snap,
         ingress_requires_dai=ingress_requires_dai,
         review_pending_candidate=review_pending_candidate,
+        pipeline_ctx=ctx,
     )
     v_todos, task_type_v, task_state_v, msg_v = validate_planner_output(
         user_text=normalized_turn,

@@ -21,7 +21,9 @@ from dual_agent.cai.planner_context import (
     strip_planner_system_prefix,
 )
 from dual_agent.cai.planner_validate import validate_planner_output
+from dual_agent.cai.pipeline_progress import advance_pipeline_node
 from dual_agent.cai.schemas import PlanStep, PlannerOutput
+from dual_agent.skill_types import SkillContext
 from dual_agent.cai.task_taxonomy import normalize_task_type
 
 
@@ -71,7 +73,10 @@ def invoke_planner(
     task_snapshot: dict | None = None,
     ingress_requires_dai: bool = False,
     review_pending_candidate: bool = False,
+    pipeline_ctx: SkillContext | None = None,
 ) -> PlannerOutput:
+    if pipeline_ctx is not None:
+        advance_pipeline_node(pipeline_ctx, "planner_llm", model=model)
     llm = ChatOllama(model=model, base_url=base_url, temperature=temperature)
     catalog_json = json.dumps(tool_catalog, ensure_ascii=False)
     prompt = ChatPromptTemplate.from_messages(

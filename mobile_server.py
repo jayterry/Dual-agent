@@ -32,8 +32,14 @@ from dual_agent.cai.context_layer import (
     remove_confirmed_fact_from_rolling_summary,
 )
 from dual_agent.cai.executor import format_results_for_display
+from dual_agent.cai.pipeline_progress import (
+    clear_pipeline_stage,
+    get_pipeline_status,
+    init_pipeline_run,
+    set_pipeline_stage,
+)
 from dual_agent.cai.plan_execute import compose_review_user_text, run_dai_then_replan, run_plan_and_execute
-from dual_agent.config import OLLAMA_BASE_URL, OLLAMA_MODEL
+from dual_agent.config import OLLAMA_BASE_URL, OLLAMA_MODEL, cai_memory_model
 from dual_agent.dai.user_db import (
     list_trusted_domains,
     mark_blocked_domain,
@@ -49,13 +55,22 @@ _SESSION_TTL_SEC = max(60, int(os.environ.get("MOBILE_SESSION_TTL_SEC", "7200"))
 
 
 def _ollama_unavailable_message(exc: BaseException) -> str | None:
-    """連線被拒時回傳給手機端的說明文字。"""
+    """Ollama 連線或模型缺失時回傳給手機端的說明文字。"""
     text = f"{type(exc).__name__}: {exc}".lower()
+    if "model" in text and "not found" in text:
+        mem = cai_memory_model()
+        models = ", ".join(dict.fromkeys([OLLAMA_MODEL, mem]))
+        return (
+            f"Ollama 找不到所需模型（{exc}）。"
+            f"請執行：ollama pull {OLLAMA_MODEL}"
+            + (f" 與 ollama pull {mem}" if mem != OLLAMA_MODEL else "")
+            + f"（服務：{OLLAMA_BASE_URL}）"
+        )
     if "connect" in text or "10061" in text or "connection refused" in text:
         return (
             f"無法連線 Ollama（{OLLAMA_BASE_URL}）。"
             "請先啟動 Ollama，並確認已 pull 模型 "
-            f"{OLLAMA_MODEL}。"
+            f"{OLLAMA_MODEL}（Memory：{cai_memory_model()}）。"
         )
     return None
 
@@ -239,12 +254,26 @@ def _build_memory_assistant_text(answer: str, results: list[Any]) -> str:
     return base or block
 
 
+def _sanitize_mobile_answer(answer: str, results: list[Any]) -> str:
+    """隱藏 Replan 內部狀態訊息，改為使用者可讀文案。"""
+    text = (answer or "").strip()
+    markers = ("待辦已空但 Replan", "Replan 未產生總結", "Replan 未標記完成")
+    if text and any(m in text for m in markers):
+        alt = _build_memory_assistant_text("", results)
+        if alt:
+            return alt
+        return (
+            "我這邊處理到一半時狀態不一致，請再試一次。"
+            "若你在補充簡訊內容，請直接貼上完整原文。"
+        )
+    return text
+
+
 def _outcome_to_response(session_id: str, out: Any) -> dict[str, Any]:
     dai = _extract_dai_from_results(list(out.results or []))
     risk_user = _extract_risk_user(dai)
-    answer = (out.answer or "").strip()
-    if dai and ("待辦已空但 Replan" in answer or "Replan 未產生總結" in answer):
-        answer = _build_memory_assistant_text("", list(out.results or [])) or answer
+    results = list(out.results or [])
+    answer = _sanitize_mobile_answer((out.answer or "").strip(), results)
     return {
         "session_id": session_id,
         "answer": answer,
@@ -283,6 +312,15 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/v1/session/{session_id}/pipeline")
+def session_pipeline(session_id: str, _: None = Depends(_require_token)) -> dict[str, Any]:
+    sid = (session_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="session_id 必填")
+    ent = _get_session(sid)
+    return get_pipeline_status(ent.ctx)
+
+
 @app.post("/v1/review")
 def review(body: ReviewBody, _: None = Depends(_require_token)) -> dict[str, Any]:
     sid = (body.session_id or "").strip() or str(uuid.uuid4())
@@ -291,13 +329,19 @@ def review(body: ReviewBody, _: None = Depends(_require_token)) -> dict[str, Any
         ent.ctx.policy_state["review_source"] = body.source.strip()
 
     context_pack = _prepare_context(ent, body.user_profile)
-    out = run_dai_then_replan(
-        message=body.message,
-        artifact=body.artifact,
-        ctx=ent.ctx,
-        guard_source=body.input_origin,
-        context_pack=context_pack,
-    )
+    clear_pipeline_stage(ent.ctx)
+    init_pipeline_run(ent.ctx, "review")
+    set_pipeline_stage(ent.ctx, flow="review", stage="ingress")
+    try:
+        out = run_dai_then_replan(
+            message=body.message,
+            artifact=body.artifact,
+            ctx=ent.ctx,
+            guard_source=body.input_origin,
+            context_pack=context_pack,
+        )
+    finally:
+        clear_pipeline_stage(ent.ctx)
 
     memory_answer = _build_memory_assistant_text(out.answer, list(out.results or []))
     user_turn = compose_review_user_text(message=body.message, artifact=body.artifact)
@@ -335,13 +379,19 @@ def chat(body: ChatBody, _: None = Depends(_require_token)) -> dict[str, Any]:
     artifact = (body.artifact or "").strip()
     guard_source = body.input_origin or ("sms_share" if artifact else "chat_box")
 
-    out = run_plan_and_execute(
-        user_text=user_prompt,
-        artifact=artifact,
-        ctx=ent.ctx,
-        guard_source=guard_source,
-        context_pack=context_pack,
-    )
+    clear_pipeline_stage(ent.ctx)
+    init_pipeline_run(ent.ctx, "chat")
+    set_pipeline_stage(ent.ctx, flow="chat", stage="ingress")
+    try:
+        out = run_plan_and_execute(
+            user_text=user_prompt,
+            artifact=artifact,
+            ctx=ent.ctx,
+            guard_source=guard_source,
+            context_pack=context_pack,
+        )
+    finally:
+        clear_pipeline_stage(ent.ctx)
 
     memory_answer = _build_memory_assistant_text(out.answer, list(out.results or []))
     user_turn = compose_review_user_text(message=user_prompt, artifact=artifact) if artifact else user_prompt

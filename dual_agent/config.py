@@ -14,6 +14,15 @@ OLLAMA_BASE_URL = _env("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = _env("OLLAMA_MODEL", "qwen2.5:7b")
 
 
+def cai_memory_model() -> str:
+    """
+    CAI Memory Manager LLM（語意 intent／關係／姓名）。
+    預設與 OLLAMA_MODEL 相同，避免本機未 pull 3b 時 404；
+    可設 CAI_MEMORY_MODEL=qwen2.5:3b 等較小模型以降延遲。
+    """
+    return _env("CAI_MEMORY_MODEL", OLLAMA_MODEL)
+
+
 def max_replan_iterations() -> int:
     raw = _env("MAX_REPLAN_ITERATIONS", "5")
     try:
@@ -51,6 +60,16 @@ def dai_risk_llm_weight() -> float:
     except ValueError:
         return 0.35
     return max(0.0, min(1.0, w))
+
+
+def memory_confidence_min() -> float:
+    """Memory Manager：寫入前最低 confidence（預設 0.65）。"""
+    raw = _env("MEMORY_CONFIDENCE_MIN", "0.65")
+    try:
+        v = float(raw)
+    except ValueError:
+        return 0.65
+    return max(0.0, min(1.0, v))
 
 
 def context_buffer_max_rounds() -> int:

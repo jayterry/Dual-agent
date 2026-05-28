@@ -299,6 +299,8 @@ def _looks_like_threat_review_body(text: str, entities: IngressEntities) -> bool
         return True
     if len(t) >= 18 and threat_hits and any(tok in t for tok in ("要", "給", "匯", "付", "殺")):
         return True
+    if threat_hits and len(t) >= 4:
+        return True
     return False
 
 
