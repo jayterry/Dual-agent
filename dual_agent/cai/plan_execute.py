@@ -30,7 +30,10 @@ from dual_agent.cai.planner_llm import invoke_planner
 from dual_agent.cai.planner_validate import validate_planner_output
 from dual_agent.cai.replan_llm import invoke_replan
 from dual_agent.cai.schemas import PlanExecuteOutcome, PlanStep, ReplanOutput
-from dual_agent.cai.review_entry_eligibility import looks_like_review_intent_without_artifact
+from dual_agent.cai.review_entry_eligibility import (
+    looks_like_review_intent_without_artifact,
+    should_abandon_pending_review,
+)
 from dual_agent.cai.skills.call_dai.handler import artifact_is_meta_only_intent
 from dual_agent.ingress import (
     DetectedTaskType,
@@ -121,6 +124,8 @@ def _set_pending_review(ctx: SkillContext, ingress: IngressPayload) -> None:
 
 def _clear_pending_review(ctx: SkillContext) -> None:
     ctx.policy_state.pop("pending_review", None)
+    ctx.policy_state.pop("pending_task", None)
+    ctx.policy_state.pop("pending_user_question", None)
 
 
 def _ingress_has_review_artifact(ingress: IngressPayload) -> bool:
@@ -777,6 +782,14 @@ def run_plan_and_execute(
     snap = _task_snapshot_from_ctx(ctx) or {}
     normalized_turn = _planner_source_turn_text(user_text, ingress)
 
+    if had_pending_review and should_abandon_pending_review(
+        normalized_turn,
+        ingress_artifact_text=(ingress.artifact_text or "").strip(),
+        pending_review=True,
+    ):
+        _clear_pending_review(ctx)
+        had_pending_review = False
+
     if _should_direct_review_ask_user(ingress):
         return _direct_review_ask_user(ctx, ingress)
 
@@ -794,7 +807,7 @@ def run_plan_and_execute(
         context_pack=context_pack,
     )
     if mem_out is not None:
-        ctx.policy_state.pop("pending_review", None)
+        _clear_pending_review(ctx)
         return mem_out
 
     if is_pure_identity_turn(normalized_turn):
@@ -850,6 +863,20 @@ def run_plan_and_execute(
     task_type = task_type_v
     task_state = task_state_v
     po_message = msg_v
+
+    if bool(ctx.policy_state.get("pending_review")):
+        art = (ingress.artifact_text or "").strip()
+        pivoted = any(s.skill == "weather" for s in v_todos) and not any(
+            s.skill == "ask_user"
+            and "簡訊" in str((s.args or {}).get("question", ""))
+            for s in v_todos
+        )
+        if should_abandon_pending_review(
+            normalized_turn,
+            ingress_artifact_text=art,
+            pending_review=True,
+        ) or (pivoted and task_type_v in ("action", "direct_response")):
+            _clear_pending_review(ctx)
 
     active_pending_review = bool(ctx.policy_state.get("pending_review"))
     results: list[SkillResult] = []

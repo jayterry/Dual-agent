@@ -216,6 +216,78 @@ def looks_like_review_intent_without_artifact(raw: str, entities: IngressEntitie
     return False
 
 
+_REVIEW_DECLINE_RE = re.compile(
+    r"(不要|沒有要|沒有|不想|不用|不必|別|勿).{0,16}(看|審|審查|查|貼|給你看).{0,10}(簡訊|訊息|短信)|"
+    r"(不要再|不用再去|不用再).{0,10}(問|要|提).{0,10}(簡訊|訊息)|"
+    r"不用審(了|查)?|不要審(了|查)?|算了.{0,8}(不要|別)",
+    re.UNICODE,
+)
+_SHORT_AFFIRMATIVE_PIVOT_RE = re.compile(
+    r"^(可以|好|好的|OK|Ok|行|沒問題)[!！。…\s]*$",
+    re.I,
+)
+_LOCATION_ONLY_RE = re.compile(
+    r"^(台灣)?(台北|台中|高雄|新北|桃園|台南|基隆|新竹|嘉義|屏東|宜蘭|花蓮|台東|澎湖|金門|馬祖)(市|縣)?$",
+    re.UNICODE,
+)
+
+
+def looks_like_review_declined(raw: str) -> bool:
+    """使用者明確拒絕送審／不要再問簡訊。"""
+    t = (raw or "").strip()
+    if not t:
+        return False
+    return bool(_REVIEW_DECLINE_RE.search(t))
+
+
+def looks_like_short_affirmative_pivot(raw: str) -> bool:
+    """待審後短肯定，常接續助理剛提議的任務（如查天氣）。"""
+    t = (raw or "").strip()
+    if not t:
+        return False
+    return bool(_SHORT_AFFIRMATIVE_PIVOT_RE.match(t))
+
+
+def looks_like_location_for_weather(raw: str) -> bool:
+    """純地名，作為天氣查詢參數補充。"""
+    t = (raw or "").strip()
+    if not t:
+        return False
+    return bool(_LOCATION_ONLY_RE.match(t))
+
+
+def should_abandon_pending_review(
+    raw: str,
+    *,
+    ingress_artifact_text: str = "",
+    pending_review: bool = False,
+) -> bool:
+    """
+    待審中是否應放棄送審、改走新任務或 direct_response。
+    供 plan_execute / validate 在 LLM 規劃前後同步狀態與底線校正。
+    """
+    if not pending_review:
+        return False
+    if (ingress_artifact_text or "").strip():
+        return False
+    t = (raw or "").strip()
+    if not t:
+        return False
+    if looks_like_review_declined(t):
+        return True
+    if looks_like_short_affirmative_pivot(t):
+        return True
+    if looks_like_location_for_weather(t):
+        return True
+    if len(t) <= 48 and _WEATHER_RE.search(t):
+        return True
+    from dual_agent.ingress import extract_entities
+
+    if looks_like_action_workflow(t, extract_entities(t)):
+        return True
+    return False
+
+
 def artifact_meta_only_for_dai(artifact_text: str) -> bool:
     """
     Executor 側：將字串視為送往 DAI 的 artifact 時，是否為「尚無正文」占位。

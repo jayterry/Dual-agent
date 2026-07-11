@@ -11,8 +11,12 @@ import re
 from typing import Any, Final
 
 from dual_agent.cai.context_layer import should_block_repeat_call_dai
-from dual_agent.cai.planner_context import explicit_web_search_requested
+from dual_agent.cai.planner_context import (
+    explicit_web_search_requested,
+    meta_question_about_assistant_behavior,
+)
 from dual_agent.cai.schemas import PlanStep
+from dual_agent.cai.review_entry_eligibility import should_abandon_pending_review
 from dual_agent.cai.skills.call_dai.handler import artifact_is_meta_only_intent
 
 _REVIEW_ASK_USER_QUESTION = "請貼上完整簡訊或訊息內容，我才能幫您審查風險。"
@@ -26,11 +30,20 @@ def _todos_have_call_dai(todos: list[PlanStep]) -> bool:
     return any(s.skill == "call_dai" for s in todos)
 
 
+def _is_review_ask_user_step(step: PlanStep) -> bool:
+    if step.skill != "ask_user":
+        return False
+    q = str((step.args or {}).get("question", ""))
+    return "簡訊" in q or "訊息" in q
+
+
 def _pending_review_followup_should_drop_dai(user_text: str) -> bool:
     """
     待審補貨流程中，若本輪明顯是閒聊／天氣等新話題，勿硬留 call_dai。
     （仍依賴 Planner 排除誤排；此處為底線。）
     """
+    if should_abandon_pending_review(user_text, pending_review=True):
+        return True
     t = (user_text or "").strip()
     if not t:
         return False
@@ -60,19 +73,23 @@ def meta_assistant_or_chat_scope(user_text: str) -> bool:
     if not t:
         return False
     patterns: Final[tuple[str, ...]] = (
+        r"^(你|妳)[?？!！。…\s]*$",
         r"^你是誰[?？!！。…\s]*$",
         r"^你又是誰[?？!！。…\s]*$",
         r"^我是誰[?？!！。…\s]*$",
         r"^你知道我是誰[?？!！。…\s]*$",
         r"(想知道|想了解).{0,14}(你|您|助理).{0,10}(可以|能|會).{0,8}(做|幫).{0,6}(什麼|甚麼|哪些)",
-        r"你(可以|能|會).{0,8}(做|幫).{0,10}(什麼|甚麼|哪些)",
+        r"你(可以|能|會).{0,12}(幫|做).{0,24}(什麼|甚麼|哪些|處理|處裡)",
+        r"^好吧?.{0,24}(你|妳).{0,8}(可以|能).{0,8}(幫|做).{0,20}(什麼|甚麼|處理|處裡)",
         r"(像是|例如).{0,8}(執行|做).{0,10}(什麼|甚麼).{0,6}(任務|事情|事)",
         r"(什麼|哪些).{0,4}(任務|事)",
         r"^(真的嗎|真的假的|有嗎|有這種事嗎)[?？!！。…\s]*$",
         r"^我叫[\w\u4e00-\u9fff\u00b7]{1,24}$",
         r"(?i)(replan|replanner|這個助理|本助理|CAI|Planner).{0,12}(能|可以).{0,8}(做|幫).{0,8}(什麼|甚麼|哪些|任務)",
     )
-    return any(re.search(p, t) for p in patterns)
+    if any(re.search(p, t) for p in patterns):
+        return True
+    return meta_question_about_assistant_behavior(t)
 
 
 def message_implies_no_tools(message: str) -> bool:
@@ -155,6 +172,28 @@ def validate_planner_output(
     itt = (ingress_detected_task_type or "").strip().lower()
     art_stripped = (ingress_artifact_text or "").strip()
 
+    if pending_review and should_abandon_pending_review(
+        user_text,
+        ingress_artifact_text=art_stripped,
+        pending_review=True,
+    ):
+        cleaned = [
+            s
+            for s in todos
+            if not _is_review_ask_user_step(s) and s.skill != "call_dai"
+        ]
+        if cleaned:
+            tt = (task_type or "").strip().lower()
+            if tt == "check":
+                tt = "action"
+            return cleaned, tt, task_state, message
+        prefix = (
+            "（規劃已校正：使用者已拒絕或轉題，不再強制追問待審簡訊；"
+            "請依本輪主鍵回答。）"
+        )
+        new_msg = f"{prefix}{message}".strip() if message else prefix
+        return [], "direct_response", "answering", new_msg
+
     if should_block_repeat_call_dai(
         task_snapshot,
         artifact_text=art_stripped,
@@ -185,6 +224,8 @@ def validate_planner_output(
                     prefix = "（規劃已校正：目前仍在等待待審內容，已移除 search_web，改為 ask_user。）"
                     new_msg = f"{prefix}{message}".strip() if message else prefix
                     return [_review_ask_user_step()], "check", "waiting_input", new_msg
+                if pending_review and not any(_is_review_ask_user_step(s) for s in todos):
+                    return todos, task_type, task_state, message
                 return todos, task_type, task_state, message
             if pending_review and _pending_review_followup_should_drop_dai(user_text):
                 prefix = (
@@ -262,18 +303,23 @@ def validate_planner_output(
         )
         return [dai_step], "check", "running", new_msg
 
-    if explicit_web_search_requested(user_text):
-        return todos, task_type, task_state, message
-
-    if not _todos_have_web_search(todos):
-        return todos, task_type, task_state, message
-
     tt = (task_type or "").strip().lower()
     msg = (message or "").strip()
 
     conflict_direct = tt in ("direct_response", "general_qa")
     conflict_message = message_implies_no_tools(msg)
     meta = meta_assistant_or_chat_scope(user_text)
+
+    if meta and _todos_have_web_search(todos):
+        prefix = "（規劃已校正：此輪為助理範圍或不需工具之任務對答，已移除不應觸發的 search_web。）"
+        new_msg = f"{prefix}{msg}".strip() if msg else prefix.strip()
+        return [], "direct_response", "answering", new_msg
+
+    if explicit_web_search_requested(user_text):
+        return todos, task_type, task_state, message
+
+    if not _todos_have_web_search(todos):
+        return todos, task_type, task_state, message
 
     if conflict_direct or conflict_message or meta:
         prefix = "（規劃已校正：此輪為助理範圍或不需工具之任務對答，已移除不應觸發的 search_web。）"

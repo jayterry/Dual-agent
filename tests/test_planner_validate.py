@@ -87,3 +87,41 @@ def test_check_without_artifact_is_corrected_to_ask_user() -> None:
     assert tt == "check"
     assert ts == "waiting_input"
     assert "待審內容" in msg
+
+
+def test_strips_search_for_meta_question_about_searching() -> None:
+    todos = [
+        PlanStep(
+            skill="search_web",
+            args={"query": "我再問妳問題，你怎麼在搜尋網頁"},
+        )
+    ]
+    out_t, tt, ts, msg = validate_planner_output(
+        user_text="我再問妳問題，你怎麼在搜尋網頁",
+        task_type="action",
+        task_state="running",
+        todos=todos,
+        message="",
+    )
+    assert out_t == []
+    assert tt == "direct_response"
+    assert ts == "answering"
+    assert "校正" in msg
+
+
+def test_strips_search_for_capability_with_typo() -> None:
+    todos = [PlanStep(skill="search_web", args={"query": "如何處裡問題"})]
+    out_t, tt, ts, _msg = validate_planner_output(
+        user_text="好吧，那你可以幫我處裡甚麼",
+        task_type="action",
+        task_state="running",
+        todos=todos,
+        message="",
+    )
+    assert out_t == []
+    assert tt == "direct_response"
+    assert ts == "answering"
+
+
+def test_meta_detects_single_ni() -> None:
+    assert meta_assistant_or_chat_scope("你")

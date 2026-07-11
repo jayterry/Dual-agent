@@ -192,10 +192,32 @@ def resolve_open_url_from_user_text(user_text: str) -> str:
     return ""
 
 
+_META_TOOL_QUESTION: Final[tuple[str, ...]] = (
+    r"(你|妳).{0,16}(怎麼|為何|為什麼|幹嘛|為啥).{0,16}(搜尋|上網查|查詢|開網頁|搜尋網頁|用工具)",
+    r"(為什麼|為何|怎麼).{0,10}(你|妳|助理).{0,12}(會|要|在|還).{0,8}(搜尋|上網|查)",
+    r"我再問.{0,16}(你|妳).{0,24}(搜尋|上網)",
+    r"(你|妳).{0,8}(在|會|要).{0,8}搜尋",
+    r"(搜尋|上網查).{0,12}(網頁|網站).{0,12}(是什麼意思|幹嘛|為何|為什麼)",
+)
+
+
+def meta_question_about_assistant_behavior(user_text: str) -> bool:
+    """
+    使用者質問助理為何使用工具／搜尋（元問題），非下達搜尋指令。
+    例：「你怎麼在搜尋網頁」「我再問妳問題，你怎麼在搜尋網頁」
+    """
+    t = strip_planner_system_prefix((user_text or "").strip())
+    if not t:
+        return False
+    return any(re.search(p, t) for p in _META_TOOL_QUESTION)
+
+
 def explicit_web_search_requested(user_text: str) -> bool:
     """本輪是否明確要求上網搜尋／查詢（優先於純記憶回答）。"""
     t = strip_planner_system_prefix((user_text or "").strip())
     if not t:
+        return False
+    if meta_question_about_assistant_behavior(t):
         return False
     if open_site_requested(t):
         return False
@@ -359,6 +381,10 @@ def apply_explicit_search_guard(
     ut = strip_planner_system_prefix((user_text or "").strip())
     names = [getattr(s, "skill", "") for s in todos]
     if open_site_requested(ut):
+        return todos, task_type, task_state
+    from dual_agent.cai.planner_validate import meta_assistant_or_chat_scope
+
+    if meta_assistant_or_chat_scope(ut) or meta_question_about_assistant_behavior(ut):
         return todos, task_type, task_state
     if not explicit_web_search_requested(ut):
         return todos, task_type, task_state

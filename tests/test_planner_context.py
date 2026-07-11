@@ -7,6 +7,7 @@ from dual_agent.cai.planner_context import (
     apply_open_site_guard,
     build_search_web_query,
     explicit_web_search_requested,
+    meta_question_about_assistant_behavior,
     open_site_requested,
     post_process_replan_todos,
 )
@@ -151,3 +152,19 @@ def test_force_replace_when_llm_wrong_first_skill() -> None:
     )
     assert todos[0].skill == "search_web"
     assert tt == "action"
+
+
+def test_meta_question_about_search_not_explicit_request() -> None:
+    q = "我再問妳問題，你怎麼在搜尋網頁"
+    assert meta_question_about_assistant_behavior(q)
+    assert not explicit_web_search_requested(q)
+    todos, tt, ts = apply_explicit_search_guard(
+        user_text=q,
+        context_pack="（無）",
+        todos=[],
+        task_type="action",
+        task_state="running",
+    )
+    assert todos == []
+    assert tt == "action"
+    assert ts == "running"

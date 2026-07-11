@@ -1,0 +1,26 @@
+[
+  {
+    "scenario": "C pending_review",
+    "turn": "我沒有要你看簡訊",
+    "severity": "fail",
+    "message": "應退出送審；pending_review 未清除"
+  },
+  {
+    "scenario": "C pending_review",
+    "turn": "可以",
+    "severity": "fail",
+    "message": "非審查 ask_user；pending_review 未清除"
+  },
+  {
+    "scenario": "C pending_review",
+    "turn": "台中市",
+    "severity": "fail",
+    "message": "weather 或 direct，非 ask_user(check)；pending_review 未清除"
+  },
+  {
+    "scenario": "D Ingress",
+    "turn": "我沒有要你看簡訊",
+    "severity": "warn",
+    "message": "不應 review_pending_candidate；itt=unknown rpc=False"
+  }
+]

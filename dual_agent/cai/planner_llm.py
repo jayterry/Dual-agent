@@ -125,7 +125,9 @@ def invoke_planner(
 - 威脅簡訊、恐嚇、綁架、勒索、要求付款等屬於 **check / review 任務**，**不得優先排 `search_web`**。
 - 若系統標記 `pending_review=true`：表示**上一輪**可能在等使用者貼上**待審正文**（簡訊摘錄）。此時請讀 Context 與【本輪使用者原句】判斷：
   - 若本輪原句**像**可疑訊息正文（金額、借還款、威脅語、連結等）或明顯在**補貼**內容：排**單一** `call_dai`，`args.artifact`＝**本輪使用者原句**（任務主鍵），`sms_review=true`；**不要**把「接續上一輪」的問句當成 artifact。
-  - 若本輪是**新話題**（天氣、閒聊、問助理能力等）：`direct_response` 或 `todos=[]`，**不要**為了「還在審查事件」而硬排 `call_dai`。
+  - 若使用者**明確拒絕**送審（如「不要看簡訊」「不用再問簡訊」）：`direct_response`，`todos=[]`，禮貌確認並結束送審任務。
+  - 若使用者**改問新任務**（天氣、開連結、搜尋等）或短肯定後補地名（「可以」→「台中市」）：依本輪意圖排對應 skill（如 `weather`），**不要**再排審查用 `ask_user`。
+  - 若本輪是**新話題**（天氣、閒聊、問助理能力等）：`direct_response` 或對應 `action`，**不要**為了「還在審查事件」而硬排 `call_dai` 或追問簡訊。
 - 若 `review_scope=none` 且 `detected_task_type=direct_response`：`todos=[]`，走一般任務對答。
 - 請優先閱讀 Context Pack 的 **【上一輪任務狀態】**（含 `review_phase`、`last_risk_score` 等）。若顯示已完成審查且本輪 user prompt **未附新的可疑正文**、也未要求再審：通常 **`direct_response`**、`todos=[]`，**禁止** `call_dai`；依其中的 `message_source`、分數與摘要回答。若本輪附**全新**正文或明確要求再審，可排 `call_dai`。
 
@@ -179,7 +181,7 @@ task_type 必須為以下之一：**direct_response** | **action** | **check** |
     )
     source_turn_display = (source_turn_text or "").strip() or strip_planner_system_prefix(user_text.strip())
     pending_note = (
-        "true（上一輪可能在等簡訊／訊息正文；若本輪原句像摘錄請單一排 call_dai，artifact=本輪原句）"
+        "true（上一輪在等簡訊正文；請判斷：補貼→call_dai／拒絕送審→direct_response／轉題→weather 等，勿再 ask_user 追簡訊）"
         if pending_review
         else "false"
     )

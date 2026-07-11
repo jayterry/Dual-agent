@@ -1,0 +1,210 @@
+{
+  "problem_id": "pending_review_無法取消",
+  "status": "fixed",
+  "severity": "high",
+  "source": "test_dialogue/pending_review_無法取消/2026-07-11_桌面app.md",
+  "description": "觸發請貼簡訊後，使用者拒絕送審或改問天氣時 pending_review 未清除，反覆 ask_user。",
+  "default_severity_on_fail": "fail",
+  "test_design": {
+    "rule": "每輪測試先重跑歷史對話（baseline），再接對照組（control）與實驗組（experimental）延伸句",
+    "baseline_source": "test_dialogue/pending_review_無法取消/2026-07-11_桌面app.md",
+    "prior_automation": "test_dialogue/pending_review_無法取消/2026-07-11_Cursor第一次測試.md"
+  },
+  "scenarios": [
+    {
+      "id": "session_baseline_then_experimental",
+      "description": "歷史對話重現（baseline）＋同一 session 實驗組延伸",
+      "type": "plan_execute_multiturn",
+      "session": "fresh",
+      "mock": {
+        "planner_default": {
+          "task_type": "action",
+          "task_state": "running",
+          "todos": [{ "skill": "weather", "args": { "location": "台中" } }],
+          "message": ""
+        },
+        "replan_default": {
+          "complete": true,
+          "final_answer": "好的。",
+          "updated_todos": [],
+          "task_state": "completed",
+          "waiting_input": false,
+          "user_prompt": ""
+        }
+      },
+      "turns": [
+        {
+          "group": "baseline",
+          "ref": "桌面app#1 / Cursor測試#1",
+          "user": "我收到一則簡訊",
+          "expect": {
+            "skills": ["ask_user"],
+            "pending_review": true
+          }
+        },
+        {
+          "group": "baseline",
+          "ref": "桌面app#2",
+          "user": "我沒有要你看簡訊",
+          "expect": {
+            "pending_review": false,
+            "forbid_review_ask_user": true
+          }
+        },
+        {
+          "group": "baseline",
+          "ref": "桌面app#5",
+          "user": "可以",
+          "expect": {
+            "pending_review": false,
+            "forbid_review_ask_user": true
+          }
+        },
+        {
+          "group": "baseline",
+          "ref": "桌面app#6",
+          "user": "台中市",
+          "expect": {
+            "pending_review": false,
+            "forbid_review_ask_user": true,
+            "skills_one_of": [["weather"], []]
+          }
+        },
+        {
+          "group": "baseline",
+          "ref": "桌面app#7 / Cursor測試#5",
+          "user": "台灣台中市明天的天氣",
+          "expect": {
+            "skills": ["weather"],
+            "forbid_review_ask_user": true
+          },
+          "note": "使用者回報此句可脫困；不強制 pending_review 已清"
+        },
+        {
+          "group": "experimental",
+          "ref": "延伸：明確放棄送審",
+          "user": "不用再問簡訊了",
+          "expect": {
+            "pending_review": false,
+            "forbid_review_ask_user": true
+          }
+        },
+        {
+          "group": "experimental",
+          "ref": "延伸：改查其他城市天氣",
+          "user": "幫我查高雄明天天氣",
+          "expect": {
+            "pending_review": false,
+            "skills": ["weather"],
+            "forbid_review_ask_user": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "control_fresh_direct_weather",
+      "description": "對照組：從未進入 pending_review，直接查天氣",
+      "type": "plan_execute_multiturn",
+      "session": "fresh",
+      "mock": {
+        "planner_default": {
+          "task_type": "action",
+          "task_state": "running",
+          "todos": [{ "skill": "weather", "args": { "location": "台中" } }],
+          "message": ""
+        },
+        "replan_default": {
+          "complete": true,
+          "final_answer": "明天多雲。",
+          "updated_todos": [],
+          "task_state": "completed"
+        }
+      },
+      "turns": [
+        {
+          "group": "control",
+          "ref": "無待審脈絡",
+          "user": "台灣台中市明天的天氣",
+          "expect": {
+            "skills": ["weather"],
+            "pending_review": false,
+            "forbid_review_ask_user": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "control_fresh_decline_without_review",
+      "description": "對照組：無待審脈絡下說拒絕句，不應進入送審",
+      "type": "plan_execute_multiturn",
+      "session": "fresh",
+      "mock": {
+        "planner_default": {
+          "task_type": "action",
+          "task_state": "running",
+          "todos": [],
+          "message": "了解，我不會查看您的簡訊。"
+        },
+        "replan_default": {
+          "complete": true,
+          "final_answer": "了解，我不會查看您的簡訊。",
+          "updated_todos": [],
+          "task_state": "completed"
+        }
+      },
+      "turns": [
+        {
+          "group": "control",
+          "ref": "無 prior pending_review",
+          "user": "我沒有要你看簡訊",
+          "expect": {
+            "pending_review": false,
+            "forbid_review_ask_user": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "decline_should_not_reenter_review_gate",
+      "description": "validate：pending_review 仍 true 時，拒絕句不應被強制送回審 ask_user",
+      "type": "validate",
+      "turns": [
+        {
+          "group": "experimental",
+          "user": "我沒有要你看簡訊",
+          "pending_review": true,
+          "planner_todos": [
+            {
+              "skill": "ask_user",
+              "args": {
+                "question": "請貼上完整簡訊或訊息內容，我才能幫您審查風險。",
+                "expected_task": "check"
+              }
+            }
+          ],
+          "expect": {
+            "forbidden_skills": ["ask_user"],
+            "task_type": "direct_response"
+          }
+        }
+      ]
+    },
+    {
+      "id": "decline_phrase_ingress_context",
+      "description": "ingress：拒絕句本身不應被當成待審候選（輔助脈絡）",
+      "type": "ingress",
+      "severity_on_fail": "info",
+      "turns": [
+        {
+          "group": "control",
+          "user": "我沒有要你看簡訊",
+          "expect": {
+            "review_pending_candidate": false,
+            "detected_task_type_not": "check",
+            "review_intent_without_artifact": false
+          }
+        }
+      ]
+    }
+  ]
+}

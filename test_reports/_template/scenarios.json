@@ -1,0 +1,56 @@
+{
+  "problem_id": "問題簡述_用底線",
+  "status": "open",
+  "severity": "high",
+  "source": "test_dialogue/問題簡述/YYYY-MM-DD_環境.md",
+  "description": "一句話描述 bug 與使用者影響",
+  "default_severity_on_fail": "fail",
+  "test_design": {
+    "rule": "每輪測試先重跑歷史對話（baseline），再接對照組（control）與實驗組（experimental）延伸句",
+    "baseline_source": "test_dialogue/問題簡述/YYYY-MM-DD_環境.md"
+  },
+  "scenarios": [
+    {
+      "id": "session_baseline_then_experimental",
+      "description": "歷史對話重現 + 同一 session 實驗組延伸",
+      "type": "plan_execute_multiturn",
+      "session": "fresh",
+      "mock": {
+        "planner_default": { "task_type": "action", "todos": [] },
+        "replan_default": { "complete": true, "final_answer": "" }
+      },
+      "turns": [
+        {
+          "group": "baseline",
+          "ref": "歷史對話#1",
+          "user": "使用者原句（重現）",
+          "expect": { "skills": [], "pending_review": false }
+        },
+        {
+          "group": "experimental",
+          "ref": "延伸探測句",
+          "user": "修復後應通過的邊界句",
+          "expect": { "pending_review": false }
+        }
+      ]
+    },
+    {
+      "id": "control_fresh_normal_path",
+      "description": "對照組：無 bug 脈絡的正常路徑",
+      "type": "plan_execute_multiturn",
+      "session": "fresh",
+      "mock": {
+        "planner_default": { "task_type": "action", "todos": [] },
+        "replan_default": { "complete": true, "final_answer": "" }
+      },
+      "turns": [
+        {
+          "group": "control",
+          "ref": "無待審脈絡",
+          "user": "正常請求句",
+          "expect": { "pending_review": false }
+        }
+      ]
+    }
+  ]
+}
