@@ -26,7 +26,7 @@ from dual_agent.cai.context_layer import (
     merge_relation_fact,
     merge_user_profile,
     normalize_user_facts,
-    pack_context,
+    build_context_pack_for_turn,
     record_turn,
     record_turn_after_review,
     remove_confirmed_fact_from_rolling_summary,
@@ -149,12 +149,18 @@ def _profile_to_dict(profile: UserProfileBody | None) -> dict[str, Any] | None:
     return out or None
 
 
-def _prepare_context(ent: _SessionEntry, profile: UserProfileBody | None) -> str:
-    """merge user_profile、組 context_pack，並同步至 SkillContext.policy_state。"""
+def _prepare_context(ent: _SessionEntry, profile: UserProfileBody | None, user_text: str) -> str:
+    """merge user_profile、依本輪 retrieve 組 context_pack，並同步至 SkillContext.policy_state。"""
     pd = _profile_to_dict(profile)
     if pd:
         merge_user_profile(ent.memory, pd)
-    cp = pack_context(ent.memory)
+    uf = normalize_user_facts(ent.ctx.policy_state.get("user_facts") or ent.memory.user_facts)
+    cp = build_context_pack_for_turn(
+        ent.memory,
+        user_text,
+        user_facts=uf,
+        pending_memory_confirm=ent.ctx.policy_state.get("pending_memory_confirm"),
+    )
     ent.ctx.policy_state["context_pack"] = cp
     ent.ctx.policy_state["user_profile"] = dict(ent.memory.user_profile or {})
     ent.ctx.policy_state["user_facts"] = normalize_user_facts(ent.memory.user_facts)
@@ -328,7 +334,7 @@ def review(body: ReviewBody, _: None = Depends(_require_token)) -> dict[str, Any
     if body.source:
         ent.ctx.policy_state["review_source"] = body.source.strip()
 
-    context_pack = _prepare_context(ent, body.user_profile)
+    context_pack = _prepare_context(ent, body.user_profile, (body.message or "").strip())
     clear_pipeline_stage(ent.ctx)
     init_pipeline_run(ent.ctx, "review")
     set_pipeline_stage(ent.ctx, flow="review", stage="ingress")
@@ -374,7 +380,7 @@ def chat(body: ChatBody, _: None = Depends(_require_token)) -> dict[str, Any]:
     if body.source:
         ent.ctx.policy_state["review_source"] = body.source.strip()
 
-    context_pack = _prepare_context(ent, body.user_profile)
+    context_pack = _prepare_context(ent, body.user_profile, (body.message or "").strip())
     user_prompt = body.message.strip()
     artifact = (body.artifact or "").strip()
     guard_source = body.input_origin or ("sms_share" if artifact else "chat_box")

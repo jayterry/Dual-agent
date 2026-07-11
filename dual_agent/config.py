@@ -23,6 +23,31 @@ def cai_memory_model() -> str:
     return _env("CAI_MEMORY_MODEL", OLLAMA_MODEL)
 
 
+def cai_ingress_model() -> str:
+    """
+    L1 Ingress Intent Router（task_type／requires_dai／artifact_role）。
+    可設 CAI_INGRESS_MODEL=qwen2.5:3b；未設時與 Memory 相同 fallback（預設 OLLAMA_MODEL）。
+    """
+    explicit = os.environ.get("CAI_INGRESS_MODEL", "").strip()
+    if explicit:
+        return explicit
+    return cai_memory_model()
+
+
+def ingress_router_enabled() -> bool:
+    raw = _env("CAI_INGRESS_ROUTER_ENABLED", "true").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def ingress_confidence_min() -> float:
+    raw = _env("INGRESS_CONFIDENCE_MIN", "0.65")
+    try:
+        v = float(raw)
+    except ValueError:
+        return 0.65
+    return max(0.0, min(1.0, v))
+
+
 def max_replan_iterations() -> int:
     raw = _env("MAX_REPLAN_ITERATIONS", "5")
     try:

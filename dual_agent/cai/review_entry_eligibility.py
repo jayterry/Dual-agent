@@ -41,8 +41,32 @@ _MAX_META_DECLARATION_LEN = 64
 _REVIEW_BLOCK = "【待審內容】"
 _WEATHER_RE = re.compile(r"(天氣|氣溫|降雨|颱風|風力)")
 _OPEN_WITH_URL_RE = re.compile(r"(開|打開|開啟).{0,16}https?://", re.IGNORECASE)
-_COMPOUND_THEN_OPEN_RE = re.compile(r"再.{0,12}(幫我)?(開|打開|開啟)")
+_COMPOUND_THEN_OPEN_RE = re.compile(r"(再|順便|然後).{0,12}(幫我)?(開|打開|開啟)")
 _PHISHING_CTA_RE = re.compile(r"(點擊|點選).{0,24}(連結|驗證|登入|完成)")
+
+
+_LINK_SAFETY_REVIEW_RE = re.compile(
+    r"(安不安全|有沒有風險|有風險嗎|危不危險|是不是詐騙|是否詐騙|可不可信|能不能點|要不要點)",
+    re.IGNORECASE,
+)
+
+
+def _urls_imply_review_body(raw: str, entities: IngressEntities) -> bool:
+    """URL 單獨不足以升格送審；需搭配審查意圖、金融／釣魚等訊號。"""
+    if not getattr(entities, "urls", None):
+        return False
+    t = (raw or "").strip()
+    if getattr(entities, "financial_terms", None):
+        return True
+    if getattr(entities, "sensitive_terms", None):
+        return True
+    if _PHISHING_CTA_RE.search(t):
+        return True
+    if _REVIEW_INTENT_ONLY_RE.search(t) or _LINK_SAFETY_REVIEW_RE.search(t):
+        return True
+    if re.search(r"[【\[][^】\]]{1,24}[】\]]", t):
+        return True
+    return False
 
 
 def looks_like_action_workflow(raw: str, entities: IngressEntities) -> bool:
@@ -133,7 +157,7 @@ def has_substantive_review_signals(raw: str, entities: IngressEntities) -> bool:
             return True
     if len(t) > _MAX_META_DECLARATION_LEN:
         return True
-    if entities.urls:
+    if _urls_imply_review_body(t, entities):
         return True
     if entities.amounts:
         return True
@@ -149,9 +173,6 @@ def has_substantive_review_signals(raw: str, entities: IngressEntities) -> bool:
         if len(digits) >= 8:
             return True
     if re.search(r"\d{5,}", t):
-        return True
-    low = t.lower()
-    if "http://" in low or "https://" in low:
         return True
     return False
 

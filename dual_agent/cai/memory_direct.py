@@ -526,6 +526,101 @@ def _format_recall_answer(relation: str, names: list[str]) -> str:
     return f"依先前記錄，您的{rel}有 {label}。"
 
 
+def format_all_user_facts_answer(user_facts: dict[str, Any] | None) -> str:
+    """枚舉目前已記住的關係事實（確定性，供 meta 問句）。"""
+    uf = normalize_user_facts(user_facts)
+    relations: dict[str, list[str]] = dict(uf.get("relations") or {})
+    if not relations:
+        return "目前我這邊還沒有記錄您告知的人際關係或名字。若要記住，請直接告訴我，例如「我媽媽叫…」。"
+    lines = ["依我這邊的記錄，目前記住的事實有："]
+    for rel, names in sorted(relations.items(), key=lambda x: x[0]):
+        if names:
+            lines.append(f"- {rel}：{format_relation_names(names)}")
+    return "\n".join(lines)
+
+
+def _answer_denies_stored_facts(answer: str) -> bool:
+    a = (answer or "").strip()
+    if not a:
+        return False
+    needles = (
+        "沒有記得",
+        "没有记得",
+        "沒記住",
+        "没记住",
+        "尚未記錄",
+        "尚未记录",
+        "還沒有記",
+        "还没有记",
+        "沒有任何記憶",
+        "没有任何记忆",
+    )
+    return any(n in a for n in needles)
+
+
+def try_format_memory_inventory_answer(
+    user_text: str,
+    user_facts: dict[str, Any] | None,
+) -> str | None:
+    from dual_agent.cai.memory_retrieval import looks_like_memory_inventory_turn
+
+    if not looks_like_memory_inventory_turn(user_text):
+        return None
+    return format_all_user_facts_answer(user_facts)
+
+
+def try_format_memory_contradiction_answer(
+    user_text: str,
+    user_facts: dict[str, Any] | None,
+) -> str | None:
+    from dual_agent.cai.memory_retrieval import looks_like_memory_contradiction_turn
+
+    uf = normalize_user_facts(user_facts)
+    relations: dict[str, list[str]] = dict(uf.get("relations") or {})
+    if not relations or not looks_like_memory_contradiction_turn(user_text):
+        return None
+    listing = format_all_user_facts_answer(uf)
+    return f"抱歉，剛才那句不準確。{listing}"
+
+
+def try_recall_relation_only_turn(
+    user_text: str,
+    user_facts: dict[str, Any] | None,
+) -> str | None:
+    """僅提及關係、未給新姓名時（如「我的媽媽」），若已記錄則回想。"""
+    uf = normalize_user_facts(user_facts)
+    relations: dict[str, list[str]] = dict(uf.get("relations") or {})
+    if not relations:
+        return None
+    text = (user_text or "").strip()
+    if not text or len(text) > 24:
+        return None
+    if looks_like_forget_memory_turn(text):
+        return None
+    if any(tok in text for tok in ("叫", "是", "誰", "谁", "什麼", "什么", "甚麼", "嗎", "吗", "?", "？")):
+        return None
+    rel = _find_relation_in_query(text, relations)
+    if not rel:
+        return None
+    names = list(relations.get(rel) or [])
+    if not names:
+        return None
+    return _format_recall_answer(rel, names)
+
+
+def relation_value_already_stored(
+    user_facts: dict[str, Any] | None,
+    relation: str,
+    value: str,
+) -> bool:
+    rel = normalize_relation(relation)
+    val = (value or "").strip()
+    if not rel or not val:
+        return False
+    names = get_relation_names(user_facts, rel)
+    return any(val.casefold() == str(n).casefold() for n in names)
+
+
 def try_recall_from_user_facts(user_text: str, user_facts: dict[str, Any] | None) -> str | None:
     """
     依 relations 確定性回想（單人、多人、人數澄清、反向誰是誰）。

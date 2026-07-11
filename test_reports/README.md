@@ -7,6 +7,7 @@
 
 | 資料夾 | 主要問題 | 狀態 | 最後審計 |
 |--------|----------|------|----------|
+| [`agent_full_coverage`](./agent_full_coverage/) | 全流程煙霧測試（Ingress／Router／CAI／DAI／Memory） | **open** | 2026-07-12 |
 | [`pending_review_無法取消`](./pending_review_無法取消/) | 拒絕送審或改話題後 `pending_review` 未清除 | **已修** | 2026-07-12 |
 
 ## 新增問題回報
@@ -32,5 +33,6 @@ python scripts/run_problem_reports_audit.py
 | `validate` | 單輪 `validate_planner_output` |
 | `ingress` | `normalize_ingress` 邊界 |
 | `semantic_router` | router / apply 覆寫 |
+| `memory_multiturn` | 記憶記住／確認／回想（mock parse_fn） |
 
 詳見 [`_template/scenarios.json`](./_template/scenarios.json)。

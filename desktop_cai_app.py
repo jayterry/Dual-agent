@@ -122,11 +122,86 @@ def _build_memory_assistant_text(answer: str, results: list[Any]) -> str:
     return base or dai_block
 
 
+def _load_auto_jobs(problem_id: str) -> list[dict[str, Any]]:
+    """從 test_reports 載入可在桌面 CAI 跑的真實 Ollama 對話輪次。"""
+    import json
+
+    path = _ROOT / "test_reports" / problem_id / "scenarios.json"
+    spec = json.loads(path.read_text(encoding="utf-8"))
+    jobs: list[dict[str, Any]] = []
+    for scenario in spec.get("scenarios") or []:
+        stype = str(scenario.get("type", ""))
+        if stype not in ("plan_execute_multiturn", "memory_multiturn"):
+            continue
+        sid = str(scenario.get("id", ""))
+        for i, turn in enumerate(scenario.get("turns") or []):
+            jobs.append(
+                {
+                    "scenario_id": sid,
+                    "group": str(turn.get("group") or ""),
+                    "ref": str(turn.get("ref") or ""),
+                    "user": str(turn["user"]),
+                    "fresh_session": i == 0,
+                }
+            )
+    return jobs
+
+
+def _write_auto_dialogue(problem_id: str, rows: list[dict[str, Any]]) -> Path:
+    from datetime import datetime, timedelta, timezone
+
+    tz8 = timezone(timedelta(hours=8))
+    now = datetime.now(tz8)
+    out_dir = _ROOT / "test_dialogue" / problem_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    base = now.strftime("%Y-%m-%d_桌面CAI對話")
+    out_path = out_dir / f"{base}.md"
+    n = 2
+    while out_path.exists():
+        out_path = out_dir / f"{base}_{n}.md"
+        n += 1
+
+    lines = [
+        f"# 測試對話：{problem_id}（桌面 CAI）",
+        "",
+        "| 項目 | 內容 |",
+        "|------|------|",
+        f"| 日期 | {now.strftime('%Y-%m-%d %H:%M')} (UTC+8) |",
+        "| 測試者 | **Cursor**（`desktop_cai_app.py --auto-problem`） |",
+        "| 環境 | 桌面 CAI + 真實 Ollama Planner/Replan + SessionMemory |",
+        f"| 對應回報 | [`test_reports/{problem_id}/`](../../test_reports/{problem_id}/) |",
+        f"| 本輪判定 | {len(rows)} 輪已執行 |",
+        "",
+        "## 對話（視窗內即時展示）",
+        "",
+        "| # | 情境 | 測試者輸入 | task_type | 計畫步驟 | pending_review | 回覆摘要 |",
+        "|---|------|-----------|-----------|----------|----------------|----------|",
+    ]
+    for i, row in enumerate(rows, 1):
+        lines.append(
+            f"| {i} | `{row['scenario_id']}` / {row['ref']} | {row['user']} | {row['task_type']} | "
+            f"{row['plan']} | {row['pending_review']} | {row['answer']} |"
+        )
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out_path
+
+
 def main() -> None:
+    import argparse
+
     from dual_agent.config import OLLAMA_BASE_URL, OLLAMA_MODEL
     from dual_agent.logutil import get_logger, setup_logging
     from dual_agent.cai.plan_execute import run_plan_and_execute
     from dual_agent.skill_types import SkillContext
+
+    parser = argparse.ArgumentParser(description="Dual-agent 桌面 CAI")
+    parser.add_argument(
+        "--auto-problem",
+        default=None,
+        help="自動在視窗內跑 test_reports 劇本（plan_execute + memory multiturn）",
+    )
+    args = parser.parse_args()
+    auto_jobs = _load_auto_jobs(args.auto_problem) if args.auto_problem else []
 
     setup_logging(level="INFO", log_file=None)
     log = get_logger("desktop_cai")
@@ -161,13 +236,18 @@ def main() -> None:
     send_btn.pack(fill=tk.X)
     clear_btn = ttk.Button(btn_frm, text="清空輸入")
     clear_btn.pack(fill=tk.X, pady=(6, 0))
+    new_chat_btn = ttk.Button(btn_frm, text="新對話")
+    new_chat_btn.pack(fill=tk.X, pady=(6, 0))
 
-    from dual_agent.cai.context_layer import SessionMemory, build_plan_summary, pack_context, record_turn
+    from dual_agent.cai.context_layer import SessionMemory, build_plan_summary, build_context_pack_for_turn, record_turn
     from dual_agent.cai.executor import format_results_for_display
 
-    q: queue.Queue[tuple[str, str | None]] = queue.Queue()
+    q: queue.Queue[tuple[str, str | None, dict[str, Any] | None]] = queue.Queue()
     ctx = SkillContext(user_input="")
     session = SessionMemory()
+    auto_index = 0
+    auto_rows: list[dict[str, Any]] = []
+    auto_running = bool(auto_jobs)
 
     def append_chat(who: str, text: str) -> None:
         chat.configure(state=tk.NORMAL)
@@ -175,9 +255,20 @@ def main() -> None:
         chat.see(tk.END)
         chat.configure(state=tk.DISABLED)
 
-    def worker(user_message: str) -> None:
+    def reset_session() -> None:
+        nonlocal ctx, session
+        ctx = SkillContext(user_input="")
+        session = SessionMemory()
+
+    def worker(user_message: str, job: dict[str, Any] | None = None) -> None:
+        meta: dict[str, Any] | None = None
         try:
-            cp = pack_context(session)
+            cp = build_context_pack_for_turn(
+                session,
+                user_message,
+                user_facts=ctx.policy_state.get("user_facts"),
+                pending_memory_confirm=ctx.policy_state.get("pending_memory_confirm"),
+            )
             out = run_plan_and_execute(user_text=user_message, ctx=ctx, context_pack=cp)
             plan_block = _build_plan_block(out.plan)
             result_summary = (
@@ -185,7 +276,19 @@ def main() -> None:
             )
             memory_answer = _build_memory_assistant_text(out.answer, out.results)
             answer_text = f"{plan_block}\n\n{memory_answer}" if memory_answer else plan_block
-            q.put(("assistant", answer_text))
+            plan_detail = " → ".join(
+                f"{s.skill} {dict(s.args or {})}" for s in out.plan
+            ) or "（空）"
+            meta = {
+                "scenario_id": (job or {}).get("scenario_id", "manual"),
+                "ref": (job or {}).get("ref", "手動"),
+                "user": user_message,
+                "task_type": out.task_type,
+                "plan": plan_detail,
+                "pending_review": bool(ctx.policy_state.get("pending_review")),
+                "answer": (memory_answer or answer_text)[:200],
+            }
+            q.put(("assistant", answer_text, meta))
             record_turn(
                 session,
                 user=user_message,
@@ -199,9 +302,33 @@ def main() -> None:
             )
         except Exception as e:  # noqa: BLE001
             log.exception("run_plan_and_execute 失敗")
-            q.put(("assistant", f"（錯誤）{e}"))
+            q.put(("assistant", f"（錯誤）{e}", meta))
+
+    def start_auto_turn() -> None:
+        nonlocal auto_index, auto_running
+        if auto_index >= len(auto_jobs):
+            auto_running = False
+            reset_session()
+            out_path = _write_auto_dialogue(args.auto_problem or "", auto_rows)
+            busy_var.set("")
+            send_btn.configure(state=tk.NORMAL)
+            append_chat(
+                "系統",
+                f"劇本執行完畢（共 {len(auto_rows)} 輪）。測試脈絡已清空，可開始手動對話。\n紀錄已寫入：\n{out_path}",
+            )
+            return
+        job = auto_jobs[auto_index]
+        if job.get("fresh_session"):
+            reset_session()
+        user_text = str(job["user"])
+        append_chat("你", user_text)
+        busy_var.set(f"自動劇本 {auto_index + 1}/{len(auto_jobs)}：思考與執行中…")
+        send_btn.configure(state=tk.DISABLED)
+        threading.Thread(target=worker, args=(user_text, job), daemon=True).start()
 
     def on_send() -> None:
+        if auto_running:
+            return
         raw = entry.get("1.0", tk.END).strip()
         if not raw:
             return
@@ -209,16 +336,23 @@ def main() -> None:
         entry.delete("1.0", tk.END)
         send_btn.configure(state=tk.DISABLED)
         busy_var.set("思考與執行中…")
-        threading.Thread(target=worker, args=(raw,), daemon=True).start()
+        threading.Thread(target=worker, args=(raw, None), daemon=True).start()
 
     def poll_queue() -> None:
+        nonlocal auto_index, auto_running
         try:
             while True:
-                role, text = q.get_nowait()
+                role, text, meta = q.get_nowait()
                 if role == "assistant":
                     busy_var.set("")
                     append_chat("助理", text or "")
-                    send_btn.configure(state=tk.NORMAL)
+                    if meta:
+                        auto_rows.append(meta)
+                    if auto_running:
+                        auto_index += 1
+                        root.after(600, start_auto_turn)
+                    else:
+                        send_btn.configure(state=tk.NORMAL)
         except queue.Empty:
             pass
         root.after(120, poll_queue)
@@ -226,18 +360,34 @@ def main() -> None:
     def on_clear() -> None:
         entry.delete("1.0", tk.END)
 
+    def on_new_chat() -> None:
+        if auto_running:
+            return
+        reset_session()
+        append_chat("系統", "已開始新對話（記憶與待審狀態已清空）。")
+
     send_btn.configure(command=on_send)
     clear_btn.configure(command=on_clear)
+    new_chat_btn.configure(command=on_new_chat)
     entry.bind("<Control-Return>", lambda _e: on_send())
 
-    append_chat(
-        "系統",
+    intro = (
         "【CAI】Planner →（Todo 非空則）Executor 執行第一項 → Replan 迴圈。\n"
         "【Memory】已啟用 Context Pack：長期摘要 + 最近 10 輪緩衝 + 任務狀態（緩衝溢出會壓縮進摘要，需 Ollama）。\n\n"
-        "輸入問題或 (skill:…) 指令。\n"
-        "（Ctrl+Enter 送出）",
     )
+    if auto_jobs:
+        intro += (
+            f"【自動劇本】`{args.auto_problem}`：共 {len(auto_jobs)} 輪（CAI multiturn + Memory）。\n"
+            "Ingress / Router / Validate 單元段請見 mock 審計紀錄。\n"
+            "即將自動開始…\n"
+        )
+        send_btn.configure(state=tk.DISABLED)
+    else:
+        intro += "輸入問題或 (skill:…) 指令。\n（Ctrl+Enter 送出）"
+    append_chat("系統", intro)
     poll_queue()
+    if auto_jobs:
+        root.after(1200, start_auto_turn)
     root.mainloop()
 
 

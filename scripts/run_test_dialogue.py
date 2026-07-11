@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from contextlib import ExitStack
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
@@ -17,14 +18,29 @@ if str(_ROOT) not in sys.path:
 from dual_agent.cai.plan_execute import run_plan_and_execute
 from dual_agent.cai.planner_validate import validate_planner_output
 from dual_agent.cai.schemas import PlanStep, PlannerOutput, ReplanOutput
+from dual_agent.cai.context_layer import normalize_user_facts
+from dual_agent.cai.memory_direct import try_handle_memory_turn
+from dual_agent.cai.semantic_router import apply_semantic_router, route_user_text
+from dual_agent.ingress import normalize_ingress
 from dual_agent.skill_types import SkillContext
-from scripts.problem_report_runner import load_problem_spec, run_all
+from scripts.problem_report_runner import (
+    _execute_step_factory,
+    _memory_parse_fn_from_rules,
+    _memory_patch,
+    _mock_planner_factory,
+    _mock_replan_factory,
+    _planner_responses_from_mock,
+    _replan_responses_from_mock,
+    load_problem_spec,
+    run_all,
+)
 
 TZ8 = timezone(timedelta(hours=8))
 GROUP_LABELS = {
     "baseline": "歷史重現",
     "control": "對照組",
     "experimental": "實驗組",
+    "unit": "單元",
 }
 
 
@@ -79,6 +95,14 @@ def _check_turn(expect: dict[str, Any], out, ctx: SkillContext) -> str:
     allowed = list(expect.get("skills_one_of") or [])
     if allowed and got_skills not in allowed:
         issues.append(f"skills 應為其中之一 {allowed}")
+    if "task_type" in expect and out.task_type != str(expect["task_type"]):
+        issues.append(f"task_type 預期 {expect['task_type']} 實際 {out.task_type}")
+    for skill in list(expect.get("forbidden_skills") or []):
+        if skill in got_skills:
+            issues.append(f"不應有 {skill}")
+    for frag in list(expect.get("answer_contains") or []):
+        if frag not in (out.answer or ""):
+            issues.append(f"回覆應含「{frag}」")
     return "✓" if not issues else "✗ " + "；".join(issues)
 
 
@@ -113,18 +137,22 @@ def _turn_row(
 def run_multiturn_dialogue(scenario: dict[str, Any], *, live: bool = False) -> list[dict[str, Any]]:
     sid = str(scenario.get("id", ""))
     mock = dict(scenario.get("mock") or {})
-    planner_default = _planner_from_mock(
-        mock.get("planner_default") or {"todos": [{"skill": "weather", "args": {"location": "台中"}}]}
-    )
-    replan_default = _replan_from_mock(mock.get("replan_default") or {"complete": True, "final_answer": "好的。"})
+    planner_responses = _planner_responses_from_mock(mock)
+    replan_responses = _replan_responses_from_mock(mock)
+    replan_mock = _mock_replan_factory(replan_responses)
     rows: list[dict[str, Any]] = []
     ctx = SkillContext(user_input="")
+    allow_memory = bool(scenario.get("allow_memory"))
+    memory_rules = list(scenario.get("memory_parse_rules") or [])
+    execute_preset = str(mock.get("execute_step") or "")
 
-    def planner_fn(**_kwargs: Any) -> PlannerOutput:
-        return planner_default
+    planner_mock = _mock_planner_factory(planner_responses)
 
-    def replan_fn(**_kwargs: Any) -> ReplanOutput:
-        return replan_default
+    def planner_fn(**kwargs: Any) -> PlannerOutput:
+        return planner_mock(**kwargs)
+
+    def replan_fn(**kwargs: Any) -> ReplanOutput:
+        return replan_mock(**kwargs)
 
     def _run_turn(turn: dict[str, Any]) -> None:
         user_text = str(turn["user"])
@@ -148,17 +176,35 @@ def run_multiturn_dialogue(scenario: dict[str, Any], *, live: bool = False) -> l
             )
         )
 
+    memory_ctx = _memory_patch(memory_rules) if allow_memory and memory_rules else None
+    execute_ctx = (
+        patch("dual_agent.cai.plan_execute.execute_step", side_effect=_execute_step_factory(execute_preset))
+        if execute_preset
+        else None
+    )
+
+    def _run_all_turns() -> None:
+        for turn in scenario.get("turns") or []:
+            _run_turn(turn)
+
     if live:
-        with patch("dual_agent.cai.plan_execute.try_handle_memory_turn", return_value=None):
-            for turn in scenario.get("turns") or []:
-                _run_turn(turn)
+        if memory_ctx:
+            with memory_ctx:
+                _run_all_turns()
+        else:
+            _run_all_turns()
         return rows
 
-    with patch("dual_agent.cai.plan_execute.try_handle_memory_turn", return_value=None):
-        with patch("dual_agent.cai.plan_execute.invoke_planner", side_effect=planner_fn):
-            with patch("dual_agent.cai.plan_execute.invoke_replan", side_effect=replan_fn):
-                for turn in scenario.get("turns") or []:
-                    _run_turn(turn)
+    with ExitStack() as stack:
+        if not (allow_memory and memory_rules):
+            stack.enter_context(patch("dual_agent.cai.plan_execute.try_handle_memory_turn", return_value=None))
+        if memory_ctx:
+            stack.enter_context(memory_ctx)
+        if execute_ctx:
+            stack.enter_context(execute_ctx)
+        stack.enter_context(patch("dual_agent.cai.plan_execute.invoke_planner", side_effect=planner_fn))
+        stack.enter_context(patch("dual_agent.cai.plan_execute.invoke_replan", side_effect=replan_fn))
+        _run_all_turns()
     return rows
 
 
@@ -179,6 +225,8 @@ def run_validate_dialogue(scenario: dict[str, Any], turn: dict[str, Any]) -> dic
     issues: list[str] = []
     if "task_type" in expect and tt != str(expect["task_type"]):
         issues.append(f"task_type 預期 {expect['task_type']} 實際 {tt}")
+    if "skills" in expect and got != list(expect["skills"]):
+        issues.append(f"skills 預期 {expect['skills']} 實際 {got}")
     for skill in list(expect.get("forbidden_skills") or []):
         if skill in got:
             issues.append(f"不應有 {skill}")
@@ -273,6 +321,130 @@ def write_dialogue_session(
     return out_path
 
 
+def run_ingress_dialogue(scenario: dict[str, Any], turn: dict[str, Any]) -> dict[str, Any]:
+    sid = str(scenario.get("id", ""))
+    user_text = str(turn["user"])
+    expect = dict(turn.get("expect") or {})
+    ing = normalize_ingress(raw_input_text=user_text, input_origin=str(turn.get("input_origin") or "chat_box"))
+    issues: list[str] = []
+    if "detected_task_type" in expect and str(ing.detected_task_type) != str(expect["detected_task_type"]):
+        issues.append(f"detected_task_type 預期 {expect['detected_task_type']}")
+    if "requires_dai" in expect and bool(ing.requires_dai) != bool(expect["requires_dai"]):
+        issues.append(f"requires_dai 預期 {expect['requires_dai']}")
+    rpc = bool((ing.metadata or {}).get("review_pending_candidate"))
+    if "review_pending_candidate" in expect and rpc != bool(expect["review_pending_candidate"]):
+        issues.append(f"review_pending_candidate 預期 {expect['review_pending_candidate']}")
+    plan = f"ingress:{ing.detected_task_type} requires_dai={ing.requires_dai}"
+    return _turn_row(
+        scenario_id=sid,
+        group=str(turn.get("group") or "unit"),
+        ref=str(turn.get("ref") or "ingress"),
+        user=user_text,
+        task_type=str(ing.detected_task_type),
+        task_state="—",
+        plan=plan,
+        answer="—",
+        pending_review="—",
+        ok="✓" if not issues else "✗ " + "；".join(issues),
+    )
+
+
+def run_semantic_router_dialogue(scenario: dict[str, Any], turn: dict[str, Any]) -> dict[str, Any]:
+    sid = str(scenario.get("id", ""))
+    user_text = str(turn["user"])
+    expect = dict(turn.get("expect") or {})
+    issues: list[str] = []
+    if turn.get("apply_over_planner"):
+        wrong = [_plan_step(t) for t in turn["apply_over_planner"]]
+        todos, tt, ts, applied = apply_semantic_router(
+            user_text=user_text,
+            todos=wrong,
+            task_type="action",
+            task_state="running",
+            ingress_requires_dai=False,
+            ingress_detected_task_type="action",
+        )
+        if expect.get("router_applied") and not applied:
+            issues.append("router 應覆寫 planner")
+        got = _skills(todos)
+        plan = " → ".join(got) if got else "（空）"
+        task_type = tt
+        task_state = ts
+    else:
+        routed = route_user_text(user_text)
+        got = _skills(routed.todos)
+        if "confidence" in expect and routed.confidence != str(expect["confidence"]):
+            issues.append(f"confidence 預期 {expect['confidence']}")
+        if "skills" in expect and got != list(expect["skills"]):
+            issues.append(f"skills 預期 {expect['skills']} 實際 {got}")
+        plan = " → ".join(got) if got else "（空）"
+        task_type = routed.task_type
+        task_state = routed.task_state
+    return _turn_row(
+        scenario_id=sid,
+        group=str(turn.get("group") or "unit"),
+        ref=str(turn.get("ref") or "semantic_router"),
+        user=user_text,
+        task_type=task_type,
+        task_state=task_state,
+        plan=plan,
+        answer="—",
+        pending_review="—",
+        ok="✓" if not issues else "✗ " + "；".join(issues),
+    )
+
+
+def run_memory_dialogue(scenario: dict[str, Any]) -> list[dict[str, Any]]:
+    sid = str(scenario.get("id", ""))
+    rules = list(scenario.get("memory_parse_rules") or [])
+    parse_fn = _memory_parse_fn_from_rules(rules)
+    ctx = SkillContext(user_input="")
+    ctx.policy_state["user_facts"] = normalize_user_facts(None)
+    rows: list[dict[str, Any]] = []
+    for turn in scenario.get("turns") or []:
+        user_text = str(turn["user"])
+        expect = dict(turn.get("expect") or {})
+        out = try_handle_memory_turn(
+            user_text,
+            ctx=ctx,
+            user_facts=normalize_user_facts(ctx.policy_state.get("user_facts")),
+            model="mock",
+            base_url="http://localhost",
+            parse_fn=parse_fn,
+        )
+        answer = (out.answer if out else "") or ""
+        issues: list[str] = []
+        if expect.get("memory_hit") is True and out is None:
+            issues.append("記憶管線應命中")
+        if expect.get("memory_hit") is False and out is not None:
+            issues.append("記憶管線不應命中")
+        for frag in list(expect.get("answer_contains") or []):
+            if frag not in answer:
+                issues.append(f"回覆應含「{frag}」")
+        rel_expect = dict(expect.get("relations") or {})
+        if rel_expect:
+            uf = normalize_user_facts(ctx.policy_state.get("user_facts"))
+            relations = uf.get("relations") or {}
+            for rel, names in rel_expect.items():
+                if relations.get(rel) != names:
+                    issues.append(f"relations[{rel}] 預期 {names}")
+        rows.append(
+            _turn_row(
+                scenario_id=sid,
+                group=str(turn.get("group") or "baseline"),
+                ref=str(turn.get("ref") or "memory"),
+                user=user_text,
+                task_type="memory",
+                task_state="completed" if out else "—",
+                plan="memory_direct",
+                answer=answer[:200],
+                pending_review="—",
+                ok="✓" if not issues else "✗ " + "；".join(issues),
+            )
+        )
+    return rows
+
+
 def collect_dialogue_rows(spec: dict[str, Any], *, live: bool = False) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for scenario in spec.get("scenarios") or []:
@@ -282,6 +454,14 @@ def collect_dialogue_rows(spec: dict[str, Any], *, live: bool = False) -> list[d
         elif stype == "validate" and not live:
             for turn in scenario.get("turns") or []:
                 rows.append(run_validate_dialogue(scenario, turn))
+        elif stype == "ingress" and not live:
+            for turn in scenario.get("turns") or []:
+                rows.append(run_ingress_dialogue(scenario, turn))
+        elif stype == "semantic_router" and not live:
+            for turn in scenario.get("turns") or []:
+                rows.append(run_semantic_router_dialogue(scenario, turn))
+        elif stype == "memory_multiturn" and not live:
+            rows.extend(run_memory_dialogue(scenario))
     return rows
 
 
@@ -289,7 +469,7 @@ def main() -> int:
     import subprocess
 
     parser = argparse.ArgumentParser(description="執行問題導向測試並寫入 test_dialogue")
-    parser.add_argument("--problem", default="pending_review_無法取消", help="test_reports 子資料夾名稱")
+    parser.add_argument("--problem", default="agent_full_coverage", help="test_reports 子資料夾名稱")
     parser.add_argument("--skip-pytest", action="store_true", help="略過 pytest 回歸")
     parser.add_argument("--live", action="store_true", help="真實 Ollama Planner/Replan（不 mock）")
     parser.add_argument("--skip-audit", action="store_true", help="略過 problem_reports 審計")

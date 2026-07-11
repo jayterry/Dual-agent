@@ -4,7 +4,7 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, Callable
 
 from dual_agent.cai.review_entry_eligibility import (
     has_substantive_review_signals,
@@ -406,12 +406,114 @@ def ingress_payload_to_dict(payload: IngressPayload) -> dict[str, Any]:
     return _ingress_payload_to_dict(payload)
 
 
+def _entities_summary_for_router(entities: IngressEntities) -> str:
+    obj = {
+        "urls": list(entities.urls or []),
+        "financial_terms": list(entities.financial_terms or []),
+        "sensitive_terms": list(entities.sensitive_terms or []),
+        "orgs": list(entities.orgs or []),
+    }
+    return json.dumps(obj, ensure_ascii=False)
+
+
+def _try_semantic_ingress_route(
+    raw: str,
+    *,
+    origin: InputOrigin,
+    entities: IngressEntities,
+    safety_relevant: bool,
+    meta: dict[str, Any],
+    src: MessageSource,
+    optional_intent: str | None,
+    ingress_router_fn: Callable[..., Any] | None = None,
+) -> IngressPayload | None:
+    from dual_agent.cai.ingress_router import (
+        build_payload_from_route_decision,
+        invoke_ingress_route_llm,
+        should_invoke_ingress_router,
+    )
+    from dual_agent.cai.ingress_router.schemas import IngressRouteDecision
+    from dual_agent.config import ingress_confidence_min, ingress_router_enabled
+
+    if not ingress_router_enabled():
+        return None
+    if not should_invoke_ingress_router(
+        raw, entities, origin=origin, safety_relevant=safety_relevant
+    ):
+        return None
+
+    fn = ingress_router_fn or invoke_ingress_route_llm
+    try:
+        decision: IngressRouteDecision | None = fn(
+            raw,
+            entities_summary=_entities_summary_for_router(entities),
+        )
+    except Exception:
+        return None
+    if decision is None or decision.confidence < ingress_confidence_min():
+        return None
+    return build_payload_from_route_decision(
+        raw=raw,
+        origin=origin,
+        entities=entities,
+        safety_relevant=safety_relevant,
+        meta=meta,
+        src=src,
+        optional_intent=optional_intent,
+        decision=decision,
+    )
+
+
+def _try_chat_url_action_fallback(
+    raw: str,
+    *,
+    origin: InputOrigin,
+    entities: IngressEntities,
+    safety_relevant: bool,
+    meta: dict[str, Any],
+    src: MessageSource,
+) -> IngressPayload | None:
+    """Router 未命中時：純 URL／開連結意圖走 action，不送審。"""
+    if not entities.urls:
+        return None
+    text = (raw or "").strip()
+    if not text or has_substantive_review_signals(text, entities):
+        return None
+    if _REVIEW_INTENT_RE.search(text):
+        return None
+    from dual_agent.cai.planner_context import (
+        explicit_web_search_requested,
+        open_site_requested,
+    )
+
+    bare_url = bool(re.match(r"^https?://\S+$", text, re.IGNORECASE))
+    if bare_url or open_site_requested(text) or explicit_web_search_requested(text):
+        fb_meta = dict(meta)
+        fb_meta["url_action_fallback"] = True
+        return IngressPayload(
+            raw_input_text=raw,
+            input_origin=origin,
+            input_role=InputRole.INTENT,
+            intent_text=raw,
+            artifact_text="",
+            review_scope=ReviewScope.NONE,
+            detected_task_type=DetectedTaskType.ACTION,
+            requires_dai=False,
+            safety_relevant=safety_relevant,
+            message_source=src,
+            entities=entities,
+            metadata=fb_meta,
+        )
+    return None
+
+
 def normalize_ingress(
     raw_input_text: str,
     input_origin: InputOrigin | str = "chat_box",
     optional_intent: str | None = None,
     message_source: MessageSource | None = None,
     metadata: dict[str, Any] | None = None,
+    ingress_router_fn: Callable[..., Any] | None = None,
 ) -> IngressPayload:
     raw = str(raw_input_text or "").strip()
     origin = _coerce_str_enum(input_origin, InputOrigin, InputOrigin.CHAT_BOX)
@@ -520,6 +622,28 @@ def normalize_ingress(
                 entities=entities,
                 metadata=meta,
             )
+        routed = _try_semantic_ingress_route(
+            raw,
+            origin=origin,
+            entities=entities,
+            safety_relevant=safety_relevant,
+            meta=meta,
+            src=src,
+            optional_intent=optional_intent,
+            ingress_router_fn=ingress_router_fn,
+        )
+        if routed is not None:
+            return routed
+        url_fallback = _try_chat_url_action_fallback(
+            raw,
+            origin=origin,
+            entities=entities,
+            safety_relevant=safety_relevant,
+            meta=meta,
+            src=src,
+        )
+        if url_fallback is not None:
+            return url_fallback
         if safety_relevant and has_substantive_review_signals(raw, entities):
             return IngressPayload(
                 raw_input_text=raw,

@@ -185,12 +185,24 @@ def test_plan_execute_clears_pending_review_on_memory() -> None:
 
 
 def test_context_pack_multi_bullet() -> None:
+    from dual_agent.cai.memory_retrieval import retrieve_memory_for_turn
+    from dual_agent.cai.context_layer import build_context_pack
+
     mem = SessionMemory()
     merge_relation_fact(mem, "專題組員", "ruby")
     append_relation_value(mem, "專題組員", "David")
-    pack = pack_context(mem)
+    uf = normalize_user_facts(mem.user_facts)
+    retrieval = retrieve_memory_for_turn("我專題組員有誰", user_facts=uf)
+    pack = build_context_pack(mem, retrieval=retrieval, user_facts=uf)
     assert "- 專題組員：" in pack
     assert format_relation_names(["ruby", "David"]) in pack
+
+    casual = build_context_pack(
+        mem,
+        retrieval=retrieve_memory_for_turn("看起來你可以正常溝通了", user_facts=uf),
+        user_facts=uf,
+    )
+    assert "ruby" not in casual
 
 
 def test_forget_clears_relations() -> None:

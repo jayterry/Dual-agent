@@ -363,13 +363,26 @@ def append_confirmed_fact_to_rolling_summary(
     session.rolling_summary = f"{existing}\n{line}".strip() if existing else line
 
 
-def format_user_facts_block(user_facts: dict[str, Any] | None) -> str:
+def format_user_facts_block(
+    user_facts: dict[str, Any] | None,
+    *,
+    relations_filter: list[str] | None = None,
+    header: str | None = None,
+) -> str:
     uf = normalize_user_facts(user_facts)
     profile = uf.get("profile") or {}
-    relations: dict[str, list[str]] = uf.get("relations") or {}
+    relations: dict[str, list[str]] = dict(uf.get("relations") or {})
+    if relations_filter:
+        allowed = {normalize_relation(r) for r in relations_filter if str(r).strip()}
+        relations = {
+            rel: names
+            for rel, names in relations.items()
+            if normalize_relation(rel) in allowed
+        }
     if not profile and not relations:
         return ""
-    lines = ["── 使用者告知的事實（已確認；回答關係／姓名問題請直接引用）", "使用者告知的事實："]
+    title = header or "── 使用者告知的事實（本輪相關；回答關係／姓名問題請直接引用）"
+    lines = [title, "使用者告知的事實："]
     for rel, names in sorted(relations.items(), key=lambda x: x[0]):
         lines.append(f"- {rel}：{format_relation_names(names)}")
     for key, val in sorted(profile.items(), key=lambda x: x[0]):
@@ -377,8 +390,8 @@ def format_user_facts_block(user_facts: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
-def format_long_term_memory_block(session: SessionMemory, *, max_summary_chars: int = 8000) -> str:
-    """【長期記憶】= 使用者基本資料 + 對話長期摘要。"""
+def format_episodic_memory_block(session: SessionMemory, *, max_summary_chars: int = 8000) -> str:
+    """【長期記憶】僅含 App 基本資料與對話摘要（不含 user_facts 關係事實）。"""
     lines: list[str] = ["【長期記憶】"]
     prof = session.user_profile or {}
     if prof:
@@ -390,9 +403,6 @@ def format_long_term_memory_block(session: SessionMemory, *, max_summary_chars: 
         if name:
             lines.append(f"display_name={name}")
         lines.append(f"assistant_name={prof.get('assistant_name') or _ASSISTANT_NAME}")
-    facts_block = format_user_facts_block(session.user_facts)
-    if facts_block:
-        lines.append(facts_block)
     rs = (session.rolling_summary or "").strip()
     if rs:
         lines.append("── 對話長期摘要")
@@ -400,6 +410,18 @@ def format_long_term_memory_block(session: SessionMemory, *, max_summary_chars: 
     if len(lines) <= 1:
         return ""
     return "\n".join(lines)
+
+
+def format_long_term_memory_block(session: SessionMemory, *, max_summary_chars: int = 8000) -> str:
+    """向後相容：episodic + session 內全部 user_facts（測試／舊呼叫端）。"""
+    parts: list[str] = []
+    episodic = format_episodic_memory_block(session, max_summary_chars=max_summary_chars)
+    if episodic:
+        parts.append(episodic)
+    facts_block = format_user_facts_block(session.user_facts)
+    if facts_block:
+        parts.append(facts_block)
+    return "\n\n".join(parts) if parts else ""
 
 
 def is_same_artifact_as_snapshot(
@@ -493,10 +515,10 @@ def format_work_state_summary(task_snapshot: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
-def pack_context(session: SessionMemory, *, max_chars_per_turn: int = 6000) -> str:
-    """組成 Context Pack（繁體中文區塊標題，供 LLM 閱讀）。"""
+def pack_episodic_context(session: SessionMemory, *, max_chars_per_turn: int = 6000) -> str:
+    """對話緩衝、長期摘要、任務狀態（不含 user_facts 關係事實）。"""
     parts: list[str] = []
-    lt = format_long_term_memory_block(session, max_summary_chars=max_chars_per_turn * 2)
+    lt = format_episodic_memory_block(session, max_summary_chars=max_chars_per_turn * 2)
     if lt:
         parts.append(lt)
     if session.recent_buffer:
@@ -528,6 +550,72 @@ def pack_context(session: SessionMemory, *, max_chars_per_turn: int = 6000) -> s
     if not parts:
         return "（尚無累積脈絡：可視為對話開頭或尚未寫回記憶。）"
     return "\n\n".join(parts)
+
+
+def pack_factual_context(
+    user_facts: dict[str, Any] | None,
+    *,
+    relations_filter: list[str] | None = None,
+) -> str:
+    """本輪相關的 user_facts 子集（由 retrieve 決定是否注入）。"""
+    block = format_user_facts_block(
+        user_facts,
+        relations_filter=relations_filter,
+        header="【本輪相關事實】",
+    )
+    return block
+
+
+def build_context_pack(
+    session: SessionMemory,
+    *,
+    retrieval: Any,
+    user_facts: dict[str, Any] | None = None,
+    max_chars_per_turn: int = 6000,
+) -> str:
+    """依 MemoryRetrievalResult 組裝 Context Pack（episodic + 可選 factual slice）。"""
+    parts: list[str] = [pack_episodic_context(session, max_chars_per_turn=max_chars_per_turn)]
+    if getattr(retrieval, "inject_facts", False):
+        uf = normalize_user_facts(user_facts if user_facts is not None else session.user_facts)
+        factual = pack_factual_context(
+            uf,
+            relations_filter=list(getattr(retrieval, "inject_relations", None) or []) or None,
+        )
+        if factual:
+            parts.append(factual)
+    return "\n\n".join(p for p in parts if p)
+
+
+def build_context_pack_for_turn(
+    session: SessionMemory,
+    user_text: str,
+    *,
+    user_facts: dict[str, Any] | None = None,
+    pending_memory_confirm: dict[str, Any] | None = None,
+    memory_intent: str | None = None,
+    max_chars_per_turn: int = 6000,
+) -> str:
+    """Retrieve 後組裝本輪 Context Pack。"""
+    from dual_agent.cai.memory_retrieval import retrieve_memory_for_turn
+
+    uf = normalize_user_facts(user_facts if user_facts is not None else session.user_facts)
+    retrieval = retrieve_memory_for_turn(
+        user_text,
+        user_facts=uf,
+        pending_memory_confirm=pending_memory_confirm,
+        memory_intent=memory_intent,
+    )
+    return build_context_pack(
+        session,
+        retrieval=retrieval,
+        user_facts=uf,
+        max_chars_per_turn=max_chars_per_turn,
+    )
+
+
+def pack_context(session: SessionMemory, *, max_chars_per_turn: int = 6000) -> str:
+    """組成 Context Pack（預設僅 episodic；不含 user_facts 關係事實）。"""
+    return pack_episodic_context(session, max_chars_per_turn=max_chars_per_turn)
 
 
 def merge_into_rolling_summary(

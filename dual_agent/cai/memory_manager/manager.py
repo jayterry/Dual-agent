@@ -19,12 +19,18 @@ from dual_agent.cai.memory_direct import (
     _format_recall_answer,
     _outcome,
     build_confirm_question,
+    format_all_user_facts_answer,
     infer_relation_for_forget,
     is_affirmative_reply,
     is_deny_reply,
     looks_like_forget_memory_turn,
+    relation_value_already_stored,
+    try_format_memory_contradiction_answer,
+    try_format_memory_inventory_answer,
     try_recall_empty_relation,
     try_recall_from_user_facts,
+    try_recall_relation_only_turn,
+    _answer_denies_stored_facts,
 )
 from dual_agent.cai.memory_manager.llm import (
     invoke_memory_turn_llm,
@@ -201,15 +207,42 @@ def _handle_forget(
     )
 
 
+def _try_deterministic_memory_read(
+    user_text: str,
+    *,
+    uf: dict[str, Any],
+) -> str | None:
+    """A'：讀取／枚舉類問句優先走確定性回答，不讓 Memory 3b 胡答。"""
+    if looks_like_forget_memory_turn(user_text):
+        return None
+    for fn in (
+        try_format_memory_inventory_answer,
+        try_format_memory_contradiction_answer,
+        try_recall_relation_only_turn,
+    ):
+        ans = fn(user_text, uf)
+        if ans:
+            return ans
+    return None
+
+
 def _handle_recall(
     decision: MemoryDecision,
     *,
     uf: dict[str, Any],
+    user_text: str = "",
 ) -> str | None:
     relations: dict[str, list[str]] = dict(uf.get("relations") or {})
     rel = normalize_relation(decision.relation or decision.raw_relation)
-    if decision.answer and decision.answer.strip():
-        return decision.answer.strip()
+    llm_ans = (decision.answer or "").strip()
+    if llm_ans and relations and _answer_denies_stored_facts(llm_ans):
+        llm_ans = ""
+    if not llm_ans:
+        det = _try_deterministic_memory_read(user_text, uf=uf)
+        if det:
+            return det
+    if llm_ans:
+        return llm_ans
     if rel:
         names = list(relations.get(rel) or [])
         if names:
@@ -316,6 +349,15 @@ def handle_memory_turn(
             classify_fn=classify_fn,
         )
 
+    det_read = _try_deterministic_memory_read(user_text, uf=uf)
+    if det_read:
+        ctx.policy_state.pop("pending_review", None)
+        return _outcome(det_read, task_state="completed")
+
+    forget_early = _handle_forget(user_text, ctx=ctx, uf=uf)
+    if forget_early is not None:
+        return forget_early
+
     _llm = memory_llm_fn
     if _llm is None and parse_fn is not None:
         _llm = _parse_fn_to_memory_llm(parse_fn)
@@ -341,10 +383,17 @@ def handle_memory_turn(
         if empty_recall:
             ctx.policy_state.pop("pending_review", None)
             return _outcome(empty_recall, task_state="completed")
-        recalled = try_recall_from_user_facts(user_text, uf)
-        if recalled:
+        from dual_agent.cai.memory_retrieval import looks_like_explicit_recall_turn
+
+        if looks_like_explicit_recall_turn(user_text):
+            recalled = try_recall_from_user_facts(user_text, uf)
+            if recalled:
+                ctx.policy_state.pop("pending_review", None)
+                return _outcome(recalled, task_state="completed")
+        inv = try_format_memory_inventory_answer(user_text, uf)
+        if inv:
             ctx.policy_state.pop("pending_review", None)
-            return _outcome(recalled, task_state="completed")
+            return _outcome(inv, task_state="completed")
         return None
 
     decision = normalize_memory_decision(decision)
@@ -358,10 +407,21 @@ def handle_memory_turn(
         if empty_recall:
             ctx.policy_state.pop("pending_review", None)
             return _outcome(empty_recall, task_state="completed")
-        recalled = try_recall_from_user_facts(user_text, uf)
-        if recalled:
+        from dual_agent.cai.memory_retrieval import looks_like_explicit_recall_turn
+
+        if looks_like_explicit_recall_turn(user_text):
+            recalled = try_recall_from_user_facts(user_text, uf)
+            if recalled:
+                ctx.policy_state.pop("pending_review", None)
+                return _outcome(recalled, task_state="completed")
+        inv = try_format_memory_inventory_answer(user_text, uf)
+        if inv:
             ctx.policy_state.pop("pending_review", None)
-            return _outcome(recalled, task_state="completed")
+            return _outcome(inv, task_state="completed")
+        contra = try_format_memory_contradiction_answer(user_text, uf)
+        if contra:
+            ctx.policy_state.pop("pending_review", None)
+            return _outcome(contra, task_state="completed")
         return None
 
     if decision.intent == "forget":
@@ -380,7 +440,11 @@ def handle_memory_turn(
         )
 
     if decision.intent == "recall":
-        ans = _handle_recall(decision, uf=uf)
+        from dual_agent.cai.memory_retrieval import should_allow_memory_recall
+
+        if not should_allow_memory_recall(user_text, memory_intent="recall"):
+            return None
+        ans = _handle_recall(decision, uf=uf, user_text=user_text)
         if not ans:
             empty_recall = try_recall_empty_relation(user_text, uf)
             if empty_recall:
@@ -394,7 +458,17 @@ def handle_memory_turn(
         return None
 
     if decision.intent == "clarify":
-        msg = (decision.answer or "").strip() or _default_clarify_answer()
+        inv = try_format_memory_inventory_answer(user_text, uf)
+        if inv:
+            return _outcome(inv, task_state="completed")
+        contra = try_format_memory_contradiction_answer(user_text, uf)
+        if contra:
+            return _outcome(contra, task_state="completed")
+        raw = (decision.answer or "").strip()
+        relations_now: dict[str, list[str]] = dict(uf.get("relations") or {})
+        if relations_now and raw and _answer_denies_stored_facts(raw):
+            return _outcome(format_all_user_facts_answer(uf), task_state="completed")
+        msg = raw or _default_clarify_answer()
         return _outcome(msg, task_state="waiting_input")
 
     if decision.intent in ("remember_set", "remember_append"):
@@ -403,9 +477,18 @@ def handle_memory_turn(
             return _outcome(msg, task_state="waiting_input")
         validated = _validate_remember(decision, uf)
         if not validated:
+            rel_only = try_recall_relation_only_turn(user_text, uf)
+            if rel_only:
+                return _outcome(rel_only, task_state="completed")
             msg = (decision.answer or "").strip() or _default_clarify_answer()
             return _outcome(msg, task_state="waiting_input")
         rel, val, mode = validated
+        if mode == "set" and relation_value_already_stored(uf, rel, val):
+            names = get_relation_names(uf, rel)
+            return _outcome(
+                _format_recall_answer(rel, names),
+                task_state="completed",
+            )
         return _start_pending_confirm(
             ctx,
             relation=rel,

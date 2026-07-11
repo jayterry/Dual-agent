@@ -1,0 +1,484 @@
+{
+  "problem_id": "agent_full_coverage",
+  "status": "open",
+  "severity": "high",
+  "source": "test_reports/agent_full_coverage/scenarios.json",
+  "description": "全流程煙霧測試：Ingress、semantic_router、validate、CAI 多輪（pending_review／送審／複合句／身份）、Memory、DAI call_dai 鏈。",
+  "default_severity_on_fail": "fail",
+  "test_design": {
+    "rule": "依模組分層：Ingress → Router → Validate → CAI 管線 → Memory；每模組含 baseline／experimental／control",
+    "baseline_source": "tests/ 黃金測試與 pending_review_無法取消 歷史對話",
+    "coverage": {
+      "ingress": ["審查進入", "SMS share", "複合 action", "拒絕句"],
+      "semantic_router": ["weather", "search_web", "open_url", "fetch_url", "call_dai", "複合句", "假設問句"],
+      "validate": ["meta 不搜尋", "pending_review", "送審無正文"],
+      "cai_skills": ["ask_user", "weather", "search_web", "open_url_readonly", "fetch_url", "call_dai", "instant_answer", "open_app", "confirm"],
+      "cai_flows": ["身份短路", "送審兩輪", "pending_review 放棄", "複合句 router 覆寫"],
+      "dai": ["call_dai 執行與 Replan 收尾"],
+      "memory": ["記住關係", "確認", "回想"]
+    }
+  },
+  "scenarios": [
+    {
+      "id": "ingress_review_and_action",
+      "description": "Ingress：審查候選、送審正文、複合 action、一般閒聊",
+      "type": "ingress",
+      "turns": [
+        {
+          "group": "baseline",
+          "ref": "僅宣告收到簡訊",
+          "user": "我收到一則簡訊",
+          "expect": {
+            "review_pending_candidate": true,
+            "detected_task_type": "check",
+            "requires_dai": false
+          }
+        },
+        {
+          "group": "baseline",
+          "ref": "意圖+釣魚正文",
+          "user": "幫我看這是不是詐騙：【XX銀行】您的帳戶異常，請點擊 https://fake.com",
+          "expect": {
+            "detected_task_type": "check",
+            "requires_dai": true
+          }
+        },
+        {
+          "group": "experimental",
+          "ref": "複合工作流非送審",
+          "user": "搜尋台北天氣，再開 https://github.com",
+          "expect": {
+            "detected_task_type": "action",
+            "requires_dai": false
+          }
+        },
+        {
+          "group": "control",
+          "ref": "一般打招呼",
+          "user": "你好",
+          "expect": {
+            "detected_task_type": "direct_response",
+            "requires_dai": false,
+            "review_pending_candidate": false
+          }
+        },
+        {
+          "group": "control",
+          "ref": "拒絕句非候選",
+          "user": "我沒有要你看簡訊",
+          "expect": {
+            "review_pending_candidate": false,
+            "detected_task_type_not": "check"
+          }
+        },
+        {
+          "group": "control",
+          "ref": "SMS share 有正文",
+          "user": "【XX銀行】您的帳戶異常，請點擊 https://fake-bank.com 完成驗證",
+          "input_origin": "sms_share",
+          "expect": {
+            "detected_task_type": "check",
+            "requires_dai": true
+          }
+        },
+        {
+          "group": "experimental",
+          "ref": "純 URL 開啟非送審",
+          "user": "https://github.com",
+          "expect": {
+            "detected_task_type": "action",
+            "requires_dai": false
+          }
+        },
+        {
+          "group": "experimental",
+          "ref": "口語複合天氣+URL",
+          "user": "幫我查一下台北天氣，順便開 https://github.com",
+          "expect": {
+            "detected_task_type": "action",
+            "requires_dai": false
+          }
+        },
+        {
+          "group": "baseline",
+          "ref": "連結安全審查",
+          "user": "幫我確認這個連結安不安全：https://bit.ly/abc",
+          "expect": {
+            "detected_task_type": "check",
+            "requires_dai": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "router_golden_skills",
+      "description": "Semantic router：各 CAI skill 路由黃金句",
+      "type": "semantic_router",
+      "turns": [
+        {
+          "group": "baseline",
+          "ref": "單一天氣",
+          "user": "查高雄明天會不會下雨",
+          "expect": { "confidence": "high", "skills": ["weather"] }
+        },
+        {
+          "group": "baseline",
+          "ref": "Google 搜尋",
+          "user": "用 Google 搜台積電股價",
+          "expect": { "confidence": "high", "skills": ["search_web"] }
+        },
+        {
+          "group": "baseline",
+          "ref": "開 URL",
+          "user": "打開 https://google.com",
+          "expect": { "confidence": "high", "skills": ["open_url_readonly"] }
+        },
+        {
+          "group": "baseline",
+          "ref": "fetch 摘要",
+          "user": "讀 https://example.com 幫我摘要",
+          "expect": { "confidence": "high", "skills": ["fetch_url"] }
+        },
+        {
+          "group": "baseline",
+          "ref": "送審含 URL",
+          "user": "幫我看這是不是詐騙：https://x.com",
+          "expect": { "confidence": "high", "skills": ["call_dai"] }
+        },
+        {
+          "group": "experimental",
+          "ref": "複合天氣+URL",
+          "user": "搜尋台北天氣，再開 https://github.com",
+          "expect": { "confidence": "high", "skills": ["weather", "open_url_readonly"] }
+        },
+        {
+          "group": "experimental",
+          "ref": "假設簡訊連結不開",
+          "user": "打開這則簡訊連結會怎樣",
+          "expect": { "confidence": "high", "skills": [], "task_type": "direct_response" }
+        },
+        {
+          "group": "control",
+          "ref": "低信心不硬判",
+          "user": "用 Google 搜台積電，再開官網",
+          "expect": { "confidence": "low", "skills": [] }
+        }
+      ]
+    },
+    {
+      "id": "router_apply_override",
+      "description": "Semantic router 覆寫錯誤 Planner todos",
+      "type": "semantic_router",
+      "turns": [
+        {
+          "group": "experimental",
+          "ref": "錯誤 search 應被拆成 weather+open_url",
+          "user": "搜尋台北天氣，再開 https://github.com",
+          "apply_over_planner": [
+            { "skill": "search_web", "args": { "query": "搜尋台北天氣，再開 https://github.com" } }
+          ],
+          "expect": {
+            "router_applied": true,
+            "skills": ["weather", "open_url_readonly"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "validate_meta_and_review",
+      "description": "Validate：meta 閒聊校正、pending_review、送審無正文",
+      "type": "validate",
+      "turns": [
+        {
+          "group": "baseline",
+          "ref": "能力問句不應 search",
+          "user": "我想知道你可以做甚麼",
+          "planner_todos": [{ "skill": "search_web", "args": { "query": "你可以做甚麼" } }],
+          "expect": { "task_type": "direct_response", "forbidden_skills": ["search_web"] }
+        },
+        {
+          "group": "baseline",
+          "ref": "單字「你」不搜尋",
+          "user": "你",
+          "planner_todos": [{ "skill": "search_web", "args": { "query": "你" } }],
+          "expect": { "task_type": "direct_response", "forbidden_skills": ["search_web"] }
+        },
+        {
+          "group": "experimental",
+          "ref": "pending_review 時 search 改 ask_user",
+          "user": "你可以幫我看看嗎",
+          "pending_review": true,
+          "planner_todos": [{ "skill": "search_web", "args": { "query": "威脅簡訊" } }],
+          "expect": { "task_type": "check", "skills": ["ask_user"] }
+        },
+        {
+          "group": "control",
+          "ref": "明文搜尋保留",
+          "user": "搜尋今日天氣",
+          "planner_todos": [{ "skill": "search_web", "args": { "query": "天氣" } }],
+          "expect": { "task_type": "action", "skills": ["search_web"] }
+        }
+      ]
+    },
+    {
+      "id": "cai_identity_and_greeting",
+      "description": "CAI 短路：身份問答、打招呼（不進 Planner）",
+      "type": "plan_execute_multiturn",
+      "session": "fresh",
+      "mock": {
+        "planner_default": { "task_type": "action", "todos": [{ "skill": "weather", "args": { "location": "台北" } }] },
+        "replan_default": { "complete": true, "final_answer": "不應走到這裡。" }
+      },
+      "turns": [
+        {
+          "group": "control",
+          "ref": "你是誰",
+          "user": "你是誰",
+          "expect": {
+            "skills": [],
+            "task_type": "direct_response",
+            "answer_contains": ["CAI"]
+          }
+        },
+        {
+          "group": "control",
+          "ref": "你好",
+          "user": "你好",
+          "expect": {
+            "skills": [],
+            "pending_review": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "cai_review_entry_ask",
+      "description": "CAI：審查意圖無正文 → ask_user + pending_review",
+      "type": "plan_execute_multiturn",
+      "session": "fresh",
+      "mock": {
+        "planner_default": { "task_type": "action", "todos": [] },
+        "replan_default": { "complete": true, "final_answer": "不應走到這裡。" }
+      },
+      "turns": [
+        {
+          "group": "baseline",
+          "ref": "怪怪的訊息",
+          "user": "我收到一個怪怪的訊息",
+          "expect": {
+            "skills": ["ask_user"],
+            "pending_review": true,
+            "task_type": "check"
+          }
+        },
+        {
+          "group": "baseline",
+          "ref": "僅宣告簡訊",
+          "user": "我收到一則簡訊",
+          "expect": {
+            "skills": ["ask_user"],
+            "pending_review": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "cai_pending_review_lifecycle",
+      "description": "CAI：pending_review 進入→放棄→改天氣（回歸 pending_review_無法取消）",
+      "type": "plan_execute_multiturn",
+      "session": "fresh",
+      "mock": {
+        "planner_default": {
+          "task_type": "action",
+          "todos": [{ "skill": "weather", "args": { "location": "台中" } }]
+        },
+        "replan_default": { "complete": true, "final_answer": "好的。" }
+      },
+      "turns": [
+        {
+          "group": "baseline",
+          "ref": "進入待審",
+          "user": "我收到一則簡訊",
+          "expect": { "skills": ["ask_user"], "pending_review": true }
+        },
+        {
+          "group": "baseline",
+          "ref": "拒絕送審",
+          "user": "我沒有要你看簡訊",
+          "expect": { "pending_review": false, "forbid_review_ask_user": true }
+        },
+        {
+          "group": "experimental",
+          "ref": "改查天氣",
+          "user": "台灣台中市明天的天氣",
+          "expect": { "skills": ["weather"], "forbid_review_ask_user": true }
+        },
+        {
+          "group": "control",
+          "ref": "無脈絡直接天氣",
+          "user": "幫我查高雄明天天氣",
+          "expect": { "skills": ["weather"], "pending_review": false }
+        }
+      ]
+    },
+    {
+      "id": "cai_review_to_dai",
+      "description": "CAI→DAI：意圖句 ask_user → 補正文 call_dai",
+      "type": "plan_execute_multiturn",
+      "session": "fresh",
+      "mock": {
+        "planner_responses": [
+          {
+            "task_type": "check",
+            "task_state": "running",
+            "todos": [
+              {
+                "skill": "call_dai",
+                "args": {
+                  "artifact": "【XX銀行】您的帳戶異常，請點擊 https://fake-bank.com 完成驗證",
+                  "sms_review": true
+                }
+              }
+            ]
+          }
+        ],
+        "execute_step": "call_dai_success",
+        "replan_default": {
+          "complete": true,
+          "final_answer": "風險分數：75/100，建議提高警覺。",
+          "task_state": "completed"
+        }
+      },
+      "turns": [
+        {
+          "group": "baseline",
+          "ref": "意圖無正文",
+          "user": "我剛剛收到一個簡訊，有點奇怪",
+          "expect": { "skills": ["ask_user"], "pending_review": true }
+        },
+        {
+          "group": "experimental",
+          "ref": "補釣魚正文",
+          "user": "【XX銀行】您的帳戶異常，請點擊 https://fake-bank.com 完成驗證",
+          "expect": { "skills": ["call_dai"] }
+        }
+      ]
+    },
+    {
+      "id": "cai_scam_url_direct",
+      "description": "CAI：意圖+URL 一輪送審 call_dai",
+      "type": "plan_execute_multiturn",
+      "session": "fresh",
+      "mock": {
+        "planner_default": {
+          "task_type": "action",
+          "todos": [{ "skill": "search_web", "args": { "query": "詐騙" } }]
+        },
+        "execute_step": "call_dai_success",
+        "replan_default": {
+          "complete": true,
+          "final_answer": "已審查完成。",
+          "task_state": "completed"
+        }
+      },
+      "turns": [
+        {
+          "group": "control",
+          "ref": "單輪 mixed 送審",
+          "user": "幫我看這是不是詐騙：https://x.com",
+          "expect": { "skills": ["call_dai"] }
+        }
+      ]
+    },
+    {
+      "id": "cai_compound_weather_url",
+      "description": "CAI：複合句執行 weather + open_url（Ingress action + 多步執行）",
+      "type": "plan_execute_multiturn",
+      "session": "fresh",
+      "mock": {
+        "planner_default": {
+          "task_type": "action",
+          "todos": [
+            { "skill": "weather", "args": { "location": "台北" } },
+            { "skill": "open_url_readonly", "args": { "url": "https://github.com" } }
+          ]
+        },
+        "execute_step": "noop_ok",
+        "replan_responses": [
+          {
+            "complete": false,
+            "final_answer": "",
+            "updated_todos": [
+              { "skill": "open_url_readonly", "args": { "url": "https://github.com" } }
+            ],
+            "task_state": "running"
+          },
+          {
+            "complete": true,
+            "final_answer": "已完成。",
+            "updated_todos": [],
+            "task_state": "completed"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "group": "experimental",
+          "ref": "複合句應執行 weather + open_url",
+          "user": "搜尋台北天氣，再開 https://github.com",
+          "expect": {
+            "skills_one_of": [["weather"], ["weather", "open_url_readonly"]],
+            "executed_skills": ["weather", "open_url_readonly"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "memory_relation_recall",
+      "description": "Memory：記住關係→確認→回想",
+      "type": "memory_multiturn",
+      "memory_parse_rules": [
+        {
+          "match_contains": "yuri",
+          "ignore_case": true,
+          "decision": {
+            "fact_type": "relation",
+            "relation": "媽媽",
+            "value": "Yuri",
+            "mode": "set"
+          }
+        }
+      ],
+      "turns": [
+        {
+          "group": "baseline",
+          "ref": "宣告記憶",
+          "user": "我媽媽叫 Yuri",
+          "expect": { "memory_hit": true, "answer_contains": ["嗎"] }
+        },
+        {
+          "group": "baseline",
+          "ref": "確認",
+          "user": "是",
+          "expect": {
+            "memory_hit": true,
+            "answer_contains": ["記住"],
+            "relations": { "媽媽": ["Yuri"] }
+          }
+        },
+        {
+          "group": "experimental",
+          "ref": "回想",
+          "user": "我媽媽是誰",
+          "expect": { "memory_hit": true, "answer_contains": ["Yuri"] }
+        },
+        {
+          "group": "control",
+          "ref": "無記憶脈絡不命中",
+          "user": "台灣台中市明天的天氣",
+          "expect": { "memory_hit": false }
+        }
+      ]
+    }
+  ]
+}

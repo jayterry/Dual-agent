@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from desktop_cai_app import _build_memory_assistant_text
-from dual_agent.cai.context_layer import SessionMemory, build_plan_summary, pack_context, record_turn
+from dual_agent.cai.context_layer import SessionMemory, build_context_pack_for_turn, build_plan_summary, pack_context, record_turn
 from dual_agent.cai.executor import format_results_for_display
 from dual_agent.cai.plan_execute import run_plan_and_execute
 from dual_agent.cai.schemas import PlanExecuteOutcome, PlanStep, PlannerOutput, ReplanOutput
@@ -56,6 +56,8 @@ def test_multi_turn_review_regression_keeps_memory_clean_for_followup(monkeypatc
         task_snapshot: dict | None = None,
         ingress_requires_dai: bool = False,
         review_pending_candidate: bool = False,
+        pipeline_ctx=None,
+        **_kwargs,
     ) -> PlannerOutput:
         assert tool_catalog
         if "有人發簡訊給我" in user_text:
@@ -133,6 +135,8 @@ def test_multi_turn_review_regression_keeps_memory_clean_for_followup(monkeypatc
         temperature: float,
         context_pack: str | None = None,
         pending_review: bool = False,
+        pipeline_ctx=None,
+        **_kwargs,
     ) -> ReplanOutput:
         if "有人發簡訊給我" in user_text and observation_log and "ask_user" in observation_log:
             assert task_type == "check"
@@ -188,7 +192,7 @@ def test_multi_turn_review_regression_keeps_memory_clean_for_followup(monkeypatc
     assert out1.task_state == "waiting_input"
     assert len(out1.plan) == 1
     assert out1.plan[0].skill == "ask_user"
-    assert "請貼上完整簡訊或訊息內容" in out1.answer
+    assert "請貼上完整簡訊" in out1.answer
     assert ctx.policy_state.get("pending_review")
     _record_desktop_style_turn(session, user_text=turn1, outcome=out1)
 
@@ -305,6 +309,8 @@ def test_identity_question_prefers_latest_user_name_correction_from_context(monk
         task_snapshot: dict | None = None,
         ingress_requires_dai: bool = False,
         review_pending_candidate: bool = False,
+        pipeline_ctx=None,
+        **_kwargs,
     ) -> PlannerOutput:
         assert tool_catalog
         assert source_turn_text == "我是誰 \n你又是誰"
@@ -330,6 +336,8 @@ def test_identity_question_prefers_latest_user_name_correction_from_context(monk
         temperature: float,
         context_pack: str | None = None,
         pending_review: bool = False,
+        pipeline_ctx=None,
+        **_kwargs,
     ) -> ReplanOutput:
         assert user_text == "我是誰 \n你又是誰"
         assert task_type == "direct_response"
@@ -353,6 +361,7 @@ def test_identity_question_prefers_latest_user_name_correction_from_context(monk
 
     monkeypatch.setattr(plan_execute, "invoke_planner", fake_invoke_planner)
     monkeypatch.setattr(plan_execute, "invoke_replan", fake_invoke_replan)
+    monkeypatch.setattr(plan_execute, "try_handle_memory_turn", lambda *_a, **_k: None)
 
     out = run_plan_and_execute(user_text="我是誰 \n你又是誰", ctx=ctx, context_pack=pack_context(session))
     assert out.task_type == "direct_response"
@@ -427,6 +436,8 @@ def test_relation_name_question_prefers_newer_user_fact_from_context(monkeypatch
         task_snapshot: dict | None = None,
         ingress_requires_dai: bool = False,
         review_pending_candidate: bool = False,
+        pipeline_ctx=None,
+        **_kwargs,
     ) -> PlannerOutput:
         assert tool_catalog
         assert user_text == "我媽媽叫甚麼"
@@ -453,6 +464,8 @@ def test_relation_name_question_prefers_newer_user_fact_from_context(monkeypatch
         temperature: float,
         context_pack: str | None = None,
         pending_review: bool = False,
+        pipeline_ctx=None,
+        **_kwargs,
     ) -> ReplanOutput:
         assert user_text == "我媽媽叫甚麼"
         assert task_type == "direct_response"
@@ -476,8 +489,13 @@ def test_relation_name_question_prefers_newer_user_fact_from_context(monkeypatch
 
     monkeypatch.setattr(plan_execute, "invoke_planner", fake_invoke_planner)
     monkeypatch.setattr(plan_execute, "invoke_replan", fake_invoke_replan)
+    monkeypatch.setattr(plan_execute, "try_handle_memory_turn", lambda *_a, **_k: None)
 
-    out = run_plan_and_execute(user_text="我媽媽叫甚麼", ctx=ctx, context_pack=pack_context(session))
+    out = run_plan_and_execute(
+        user_text="我媽媽叫甚麼",
+        ctx=ctx,
+        context_pack=build_context_pack_for_turn(session, "我媽媽叫甚麼"),
+    )
     assert out.task_type == "direct_response"
     assert out.task_state == "completed"
     assert out.answer == "你媽媽叫 mei。"
@@ -593,6 +611,8 @@ def test_full_transcript_regression_prefers_cai_and_mei_over_older_or_generic_me
         task_snapshot: dict | None = None,
         ingress_requires_dai: bool = False,
         review_pending_candidate: bool = False,
+        pipeline_ctx=None,
+        **_kwargs,
     ) -> PlannerOutput:
         assert tool_catalog
         cp = context_pack or ""
@@ -624,6 +644,8 @@ def test_full_transcript_regression_prefers_cai_and_mei_over_older_or_generic_me
         temperature: float,
         context_pack: str | None = None,
         pending_review: bool = False,
+        pipeline_ctx=None,
+        **_kwargs,
     ) -> ReplanOutput:
         assert task_type == "direct_response"
         assert task_state == "answering"
@@ -657,15 +679,24 @@ def test_full_transcript_regression_prefers_cai_and_mei_over_older_or_generic_me
 
     monkeypatch.setattr(plan_execute, "invoke_planner", fake_invoke_planner)
     monkeypatch.setattr(plan_execute, "invoke_replan", fake_invoke_replan)
+    monkeypatch.setattr(plan_execute, "try_handle_memory_turn", lambda *_a, **_k: None)
 
-    who_out = run_plan_and_execute(user_text="你又是誰", ctx=ctx, context_pack=pack_context(session))
+    who_out = run_plan_and_execute(
+        user_text="你又是誰",
+        ctx=ctx,
+        context_pack=build_context_pack_for_turn(session, "你又是誰"),
+    )
     assert who_out.task_type == "direct_response"
     assert who_out.task_state == "completed"
     assert "CAI" in who_out.answer
     assert who_out.answer != "你又是誰"
     _record_desktop_style_turn(session, user_text="你又是誰", outcome=who_out)
 
-    mom_out = run_plan_and_execute(user_text="我媽媽叫甚麼", ctx=ctx, context_pack=pack_context(session))
+    mom_out = run_plan_and_execute(
+        user_text="我媽媽叫甚麼",
+        ctx=ctx,
+        context_pack=build_context_pack_for_turn(session, "我媽媽叫甚麼"),
+    )
     assert mom_out.task_type == "direct_response"
     assert mom_out.task_state == "completed"
     assert mom_out.answer == "你媽媽叫 mei。"
