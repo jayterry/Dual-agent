@@ -1,0 +1,2 @@
+{"id": "example-scam-001", "text": "請立即驗證您的網路銀行密碼", "source": "sms", "label": "scam", "verdict_gt": "block", "fraud_types_gt": ["credential_harvesting"], "annotator": "human", "split": "train", "notes": "格式範例"}
+{"id": "example-benign-001", "text": "您的包裹已送達門市", "source": "sms", "label": "benign", "verdict_gt": "allow", "fraud_types_gt": [], "annotator": "human", "split": "train", "notes": "格式範例"}

@@ -23,3 +23,13 @@ env/
 Thumbs.db
 
 user_profile_db.json
+
+# ML 訓練產物（保留 example / README）
+data/risk_training/labels_synthetic.jsonl
+data/risk_training/labels.jsonl
+data/risk_training/features*.csv
+data/risk_training/features*.jsonl
+data/risk_models/**/*
+!data/risk_models/.gitkeep
+data/risk_models/**/eval_plots/
+data/semantic_router_batch_report.json

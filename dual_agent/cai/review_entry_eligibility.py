@@ -39,6 +39,72 @@ _REVIEW_INTENT_ONLY_RE = re.compile(
 )
 _MAX_META_DECLARATION_LEN = 64
 _REVIEW_BLOCK = "【待審內容】"
+_WEATHER_RE = re.compile(r"(天氣|氣溫|降雨|颱風|風力)")
+_OPEN_WITH_URL_RE = re.compile(r"(開|打開|開啟).{0,16}https?://", re.IGNORECASE)
+_COMPOUND_THEN_OPEN_RE = re.compile(r"再.{0,12}(幫我)?(開|打開|開啟)")
+_PHISHING_CTA_RE = re.compile(r"(點擊|點選).{0,24}(連結|驗證|登入|完成)")
+
+
+def looks_like_action_workflow(raw: str, entities: IngressEntities) -> bool:
+    """
+    複合工作指令（搜尋／天氣／開連結等）：句中即使有 URL 也不應整句升格為防詐送審。
+    """
+    t = (raw or "").strip()
+    if not t:
+        return False
+
+    from dual_agent.cai.planner_context import (
+        explicit_web_search_requested,
+        open_site_requested,
+    )
+    from dual_agent.ingress import (
+        _ACTION_SEARCH_RE,
+        _REVIEW_INTENT_RE,
+        _looks_like_threat_review_body,
+    )
+
+    if _REVIEW_INTENT_RE.search(t) or _REVIEW_INTENT_ONLY_RE.search(t):
+        return False
+    if re.search(r"(是不是|是否).{0,8}詐騙", t):
+        return False
+    if _looks_like_threat_review_body(t, entities):
+        return False
+    if entities.financial_terms or entities.sensitive_terms:
+        return False
+    if _PHISHING_CTA_RE.search(t):
+        return False
+    if re.search(r"[【\[][^】\]]{1,24}[】\]]", t) and entities.urls:
+        if not open_site_requested(t) and not _ACTION_SEARCH_RE.search(t):
+            return False
+
+    has_action = (
+        bool(_ACTION_SEARCH_RE.search(t))
+        or explicit_web_search_requested(t)
+        or open_site_requested(t)
+        or bool(_WEATHER_RE.search(t))
+    )
+    if not has_action:
+        return False
+
+    if entities.urls:
+        return (
+            open_site_requested(t)
+            or bool(_OPEN_WITH_URL_RE.search(t))
+            or bool(_COMPOUND_THEN_OPEN_RE.search(t))
+            or (
+                bool(_WEATHER_RE.search(t))
+                and (
+                    bool(_OPEN_WITH_URL_RE.search(t))
+                    or bool(_COMPOUND_THEN_OPEN_RE.search(t))
+                )
+            )
+            or (
+                bool(_ACTION_SEARCH_RE.search(t))
+                and bool(_COMPOUND_THEN_OPEN_RE.search(t))
+            )
+        )
+
+    return True
 
 
 def has_substantive_review_signals(raw: str, entities: IngressEntities) -> bool:

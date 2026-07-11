@@ -8,6 +8,7 @@ from typing import Any
 
 from dual_agent.cai.review_entry_eligibility import (
     has_substantive_review_signals,
+    looks_like_action_workflow,
     looks_like_review_intent_without_artifact,
 )
 
@@ -499,6 +500,22 @@ def normalize_ingress(
                 detected_task_type=DetectedTaskType.DIRECT_RESPONSE,
                 requires_dai=False,
                 safety_relevant=False,
+                message_source=src,
+                entities=entities,
+                metadata=meta,
+            )
+        if looks_like_action_workflow(raw, entities):
+            meta["action_workflow"] = True
+            return IngressPayload(
+                raw_input_text=raw,
+                input_origin=origin,
+                input_role=InputRole.INTENT,
+                intent_text=raw,
+                artifact_text="",
+                review_scope=ReviewScope.NONE,
+                detected_task_type=DetectedTaskType.ACTION,
+                requires_dai=False,
+                safety_relevant=safety_relevant,
                 message_source=src,
                 entities=entities,
                 metadata=meta,

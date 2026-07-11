@@ -239,6 +239,7 @@ def validate_planner_output(
 
     if (
         itt == "check"
+        and (ingress_detected_task_type or "").strip().lower() != "action"
         and ingress_requires_dai
         and art_stripped
         and not should_block_repeat_call_dai(

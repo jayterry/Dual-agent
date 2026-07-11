@@ -21,6 +21,7 @@ from dual_agent.cai.planner_context import (
     strip_planner_system_prefix,
 )
 from dual_agent.cai.planner_validate import validate_planner_output
+from dual_agent.cai.semantic_router import apply_semantic_router
 from dual_agent.cai.pipeline_progress import advance_pipeline_node
 from dual_agent.cai.schemas import PlanStep, PlannerOutput
 from dual_agent.skill_types import SkillContext
@@ -101,6 +102,7 @@ def invoke_planner(
 - 「幫我看簡訊／審簡訊／是不是詐騙簡訊」→ `check`：僅在**本輪原句已含可審查的簡訊正文**（或 Context 已明確貼過全文）時，排**單一** `call_dai`，`args.artifact`＝該正文、`args.user_text`＝本輪意圖短句（可空）。若原句僅為「我收到一則簡訊」「幫我看簡訊」等**未附內文**的宣告，**禁止** `call_dai`（勿把該句當 artifact）；改為**單一** `ask_user`，`args.question` 請使用者貼上**完整簡訊全文**（可加 `rationale` 簡述為何需要）。
 - `call_dai` 的 `args.context_pack`：**請留空**（系統會自動注入與本輪相同的 Context Pack 給 DAI）；**禁止**在 args 內手動貼整段 Context。
 - 「搜尋我喜歡的遊戲」→ `action`，`search_web`
+- 「搜尋台北天氣，再幫我開 https://github.com」→ `action`，`weather`（`args.location`）＋`open_url_readonly`（`args.url`）；**禁止** `call_dai`（工作指令，非簡訊審查）
 - 「真的嗎？」「你怎麼知道？」→ `direct_response`（接續釐清），通常 `todos=[]`
 - 「打開 Google／打開 google.com／開啟 YouTube」→ `action`，**單一** `open_url_readonly`（`args.url` 為 https 首頁）；**禁止** `search_web`（不要把「打開google」當成搜尋關鍵字）
 - 「打開這則簡訊中的 url／連結**會怎樣**」「點了會不會中毒」等**假設／風險詢問**（句中無具體 http(s)）：**禁止** `open_url_readonly`／`search_web`；`direct_response`、`todos=[]`，依 Context Pack／送審結果說明風險，勿真的開瀏覽器
@@ -255,17 +257,26 @@ task_type 必須為以下之一：**direct_response** | **action** | **check** |
         ingress_requires_dai=ingress_requires_dai,
         review_pending_candidate=review_pending_candidate,
     )
-    todos, task_type, task_state = apply_open_site_guard(
+    todos, task_type, task_state, router_applied = apply_semantic_router(
         user_text=intent,
         todos=todos,
         task_type=task_type,
         task_state=task_state,
+        ingress_requires_dai=ingress_requires_dai,
+        ingress_detected_task_type=ingress_detected_task_type,
     )
-    todos, task_type, task_state = apply_explicit_search_guard(
-        user_text=intent,
-        context_pack=context_pack,
-        todos=todos,
-        task_type=task_type,
-        task_state=task_state,
-    )
+    if not router_applied:
+        todos, task_type, task_state = apply_open_site_guard(
+            user_text=intent,
+            todos=todos,
+            task_type=task_type,
+            task_state=task_state,
+        )
+        todos, task_type, task_state = apply_explicit_search_guard(
+            user_text=intent,
+            context_pack=context_pack,
+            todos=todos,
+            task_type=task_type,
+            task_state=task_state,
+        )
     return PlannerOutput(task_type=task_type, task_state=task_state, todos=todos, message=message)
