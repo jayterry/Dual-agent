@@ -87,6 +87,32 @@ def dai_risk_llm_weight() -> float:
     return max(0.0, min(1.0, w))
 
 
+def dai_risk_fusion_mode() -> str:
+    """
+    DAI 風險融合模式：
+    - legacy：人工權重（預設）
+    - ml_lr：銀行面 Logistic Regression
+    - ml_rf：預留 Random Forest
+    """
+    raw = _env("DAI_RISK_FUSION_MODE", "legacy").strip().lower()
+    if raw in ("ml", "ml_lr", "logistic", "lr"):
+        return "ml_lr"
+    if raw in ("ml_rf", "rf", "random_forest"):
+        return "ml_rf"
+    return "legacy"
+
+
+def dai_ml_model_path() -> str:
+    """ML 融合模型 .pkl 路徑；空字串則用銀行面預設相對路徑。"""
+    explicit = os.environ.get("DAI_ML_MODEL_PATH", "").strip()
+    if explicit:
+        return explicit
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    return str(root / "data" / "risk_models" / "lr_bank_v0_gd" / "model.pkl")
+
+
 def memory_confidence_min() -> float:
     """Memory Manager：寫入前最低 confidence（預設 0.65）。"""
     raw = _env("MEMORY_CONFIDENCE_MIN", "0.65")

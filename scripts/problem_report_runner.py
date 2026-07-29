@@ -462,6 +462,93 @@ def _run_memory_multiturn(
                     result.add(sid, user_text, severity, f"relations[{rel}] 應為 {names}；實際 {got}", group)
 
 
+def _run_risk_analysis_scenario(
+    result: ProblemAuditResult,
+    scenario: dict[str, Any],
+    default_severity: str,
+) -> None:
+    """直接跑 DAI run_risk_analysis（可設 fusion_mode；關閉 semantic LLM）。"""
+    import os
+
+    from dual_agent.dai.risk_analysis.pipeline import run_risk_analysis
+    from dual_agent.dai.schemas import DAIRequest
+
+    sid = str(scenario["id"])
+    fusion_mode = str(scenario.get("fusion_mode") or "legacy")
+    prev_mode = os.environ.get("DAI_RISK_FUSION_MODE")
+    prev_sem = os.environ.get("DAI_SEMANTIC_LLM")
+    os.environ["DAI_RISK_FUSION_MODE"] = fusion_mode
+    os.environ["DAI_SEMANTIC_LLM"] = "0"
+    try:
+        for turn in scenario.get("turns") or []:
+            user_text = str(turn["user"])
+            expect = dict(turn.get("expect") or {})
+            group = str(turn.get("group") or "")
+            severity = str(
+                turn.get("severity_on_fail") or scenario.get("severity_on_fail") or default_severity
+            )
+            report = run_risk_analysis(
+                DAIRequest(user_text=user_text, artifact=user_text, sms_review=True, source="audit"),
+            )
+            score = int(report.get("risk_score") or 0)
+            verdict = str(report.get("verdict") or "")
+            rf = report.get("risk_fusion") if isinstance(report.get("risk_fusion"), dict) else {}
+            mode = str(rf.get("mode") or "")
+            r_rules = int((report.get("component_scores") or {}).get("r_rules") or 0)
+
+            if "verdict" in expect and verdict != str(expect["verdict"]):
+                result.add(sid, user_text, severity, f"verdict 應為 {expect['verdict']}；實際 {verdict}", group)
+            allowed = list(expect.get("verdict_one_of") or [])
+            if allowed and verdict not in allowed:
+                result.add(sid, user_text, severity, f"verdict 應為 {allowed} 之一；實際 {verdict}", group)
+            if "min_risk_score" in expect and score < int(expect["min_risk_score"]):
+                result.add(
+                    sid,
+                    user_text,
+                    severity,
+                    f"risk_score 應 ≥ {expect['min_risk_score']}；實際 {score}",
+                    group,
+                )
+            if "max_risk_score" in expect and score > int(expect["max_risk_score"]):
+                result.add(
+                    sid,
+                    user_text,
+                    severity,
+                    f"risk_score 應 ≤ {expect['max_risk_score']}；實際 {score}",
+                    group,
+                )
+            frag = expect.get("risk_fusion_mode_contains")
+            if frag and frag not in mode:
+                result.add(
+                    sid,
+                    user_text,
+                    severity,
+                    f"risk_fusion.mode 應含「{frag}」；實際 {mode}",
+                    group,
+                )
+            if expect.get("has_p_fraud") and rf.get("p_fraud") is None:
+                result.add(sid, user_text, severity, "risk_fusion 應含 p_fraud", group)
+            if "hard_guard_or_rules_ge" in expect:
+                need = int(expect["hard_guard_or_rules_ge"])
+                if r_rules < need and score < need:
+                    result.add(
+                        sid,
+                        user_text,
+                        severity,
+                        f"硬擋／分數應 ≥ {need}（r_rules={r_rules}, score={score}）",
+                        group,
+                    )
+    finally:
+        if prev_mode is None:
+            os.environ.pop("DAI_RISK_FUSION_MODE", None)
+        else:
+            os.environ["DAI_RISK_FUSION_MODE"] = prev_mode
+        if prev_sem is None:
+            os.environ.pop("DAI_SEMANTIC_LLM", None)
+        else:
+            os.environ["DAI_SEMANTIC_LLM"] = prev_sem
+
+
 def run_problem_scenarios(problem_dir: Path, spec: dict[str, Any]) -> ProblemAuditResult:
     problem_id = str(spec.get("problem_id") or problem_dir.name)
     status = str(spec.get("status", "open"))
@@ -476,6 +563,7 @@ def run_problem_scenarios(problem_dir: Path, spec: dict[str, Any]) -> ProblemAud
         "semantic_router": _run_semantic_router_scenario,
         "plan_execute_multiturn": _run_plan_execute_multiturn,
         "memory_multiturn": _run_memory_multiturn,
+        "risk_analysis": _run_risk_analysis_scenario,
     }
     for scenario in spec.get("scenarios") or []:
         stype = str(scenario.get("type", ""))

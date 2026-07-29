@@ -238,11 +238,13 @@ def finalize_display_risk_score(
     r_llm_optional: int = 0,
     safety_summary: str = "",
     semantic_labels: list[str] | None = None,
+    apply_semantic_floor: bool = True,
 ) -> tuple[int, int, int, int, bool]:
     """
     最終顯示分（0–100）。
 
     回傳 (risk_score, adjusted, delta_user_effective, semantic_floor, ueba_guard_applied)。
+    ml_* 模式請設 apply_semantic_floor=False，避免與 ML 雙重抬分。
     """
     _ = safety_summary, r_llm_optional
     adjusted, delta_effective, ueba_guard = apply_ueba_adjustment(
@@ -251,7 +253,7 @@ def finalize_display_risk_score(
         r_rules=r_rules,
         r_threat_intel=r_threat_intel,
     )
-    sem_floor = semantic_floor_from_labels(semantic_labels)
+    sem_floor = semantic_floor_from_labels(semantic_labels) if apply_semantic_floor else 0
     risk_score = max(adjusted, sem_floor)
     return risk_score, adjusted, delta_effective, sem_floor, ueba_guard
 

@@ -4,6 +4,7 @@ from dual_agent.dai.risk_analysis.ml.feature_extractor import RiskFeatureVector,
 from dual_agent.dai.risk_analysis.ml.feature_spec import FEATURE_SPEC_VERSION, all_feature_names
 from dual_agent.dai.risk_analysis.ml.gradient_descent_lr import LogisticRegressionGD
 from dual_agent.dai.risk_analysis.ml.labels import LabelRecord, load_labels_jsonl, write_labels_jsonl
+from dual_agent.dai.risk_analysis.ml.llm_synth import generate_bank_corpus
 from dual_agent.dai.risk_analysis.ml.pipeline_replay import replay_feature_context
 
 __all__ = [
@@ -12,6 +13,7 @@ __all__ = [
     "RiskFeatureVector",
     "all_feature_names",
     "extract_features",
+    "generate_bank_corpus",
     "load_labels_jsonl",
     "LogisticRegressionGD",
     "replay_feature_context",

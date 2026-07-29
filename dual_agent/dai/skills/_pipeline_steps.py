@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from dual_agent.config import dai_risk_llm_weight
+from dual_agent.config import dai_risk_fusion_mode, dai_risk_llm_weight
 from dual_agent.dai.pipeline_context import SMS_REVIEW_DAG, DefensePipelineContext
 from dual_agent.dai.risk_analysis.payload import build_analysis_payload, text_for_analysis
 from dual_agent.dai.risk_analysis.providers import (
@@ -98,16 +98,51 @@ def step_fuse_risk_and_ueba(ctx: DefensePipelineContext) -> None:
     tier_h = int(semantic.get("tier_h") or 0)
     tier_i = int(semantic.get("tier_i") or 0)
     r_llm_optional = int(ctx.component_scores.get("r_llm_optional") or 0)
+    ctx.component_scores["tier_h"] = tier_h
+    ctx.component_scores["tier_i"] = tier_i
 
-    fusion = fuse_risk_score_weighted(
-        r_rules=ctx.r_rules,
-        r_threat_intel=ctx.r_threat_intel,
-        r_tls=ctx.r_tls,
-        r_toxic_fused=ctx.r_toxic_fused,
-        r_llm_optional=r_llm_optional,
-        tier_h=tier_h,
-        tier_i=tier_i,
-    )
+    fusion_mode = dai_risk_fusion_mode()
+    ml_meta: dict[str, Any] = {}
+    rules_hit_dicts = rules_hits_to_dict(ctx.rules_res.hits) if ctx.rules_res is not None else []
+
+    if fusion_mode.startswith("ml"):
+        from dual_agent.dai.risk_analysis.ml.infer import fuse_risk_score_ml
+
+        ents = (ctx.payload or {}).get("entities") or {}
+        ml = fuse_risk_score_ml(
+            text=ctx.text,
+            component_scores=dict(ctx.component_scores),
+            rules_hits=rules_hit_dicts,
+            semantic=dict(semantic or {}),
+            toxic_meta=dict(ctx.toxic_meta or {}),
+            url_threat_hits=list(ctx.url_threat_hits or []),
+            missing_evidence=list(ctx.missing_evidence or []),
+            source=str(ctx.source or "desktop"),
+            phones=list(ents.get("phones") or []),
+            amounts=list(ents.get("amounts") or []),
+            urls=list(ctx.urls_from_text or []),
+            mode=fusion_mode,
+        )
+        fusion = ml.fusion
+        ml_meta = {
+            "p_fraud": ml.p_fraud,
+            "model_path": ml.model_path,
+            "feature_snapshot": ml.feature_snapshot,
+            "mode": ml.mode,
+        }
+        apply_sem_floor = False
+    else:
+        fusion = fuse_risk_score_weighted(
+            r_rules=ctx.r_rules,
+            r_threat_intel=ctx.r_threat_intel,
+            r_tls=ctx.r_tls,
+            r_toxic_fused=ctx.r_toxic_fused,
+            r_llm_optional=r_llm_optional,
+            tier_h=tier_h,
+            tier_i=tier_i,
+        )
+        apply_sem_floor = True
+
     r_final = fusion.r_fused
     machine = fusion.machine
     cs = ctx.component_scores
@@ -136,6 +171,7 @@ def step_fuse_risk_and_ueba(ctx: DefensePipelineContext) -> None:
         r_llm_optional=r_llm_optional,
         safety_summary=safety_summary_raw,
         semantic_labels=semantic_labels,
+        apply_semantic_floor=apply_sem_floor,
     )
     cs["delta_user"] = int(ur.delta_user)
     cs["delta_user_effective"] = delta_effective
@@ -145,7 +181,7 @@ def step_fuse_risk_and_ueba(ctx: DefensePipelineContext) -> None:
     verdict = verdict_from_score(risk_score)
 
     evidence: list[dict[str, Any]] = []
-    evidence.extend(rules_hits_to_dict(ctx.rules_res.hits))
+    evidence.extend(rules_hit_dicts)
     evidence.extend(ctx.ti_evidence)
     evidence.extend(ctx.tls_evidence)
     if ctx.toxic_meta.get("s_tox", 0):
@@ -165,6 +201,8 @@ def step_fuse_risk_and_ueba(ctx: DefensePipelineContext) -> None:
         reason_highlights.append(f"毒樣相似（{ctx.r_toxic_fused} 分）")
     if r_llm_optional:
         reason_highlights.append(f"語意框架/語言品質（{r_llm_optional} 分）")
+    if ml_meta.get("p_fraud") is not None:
+        reason_highlights.append(f"ML P(fraud)={float(ml_meta['p_fraud']):.2f}")
     if len(reason_highlights) < 3 and summary_indicates_scam(safety_summary_raw) and ctx.r_rules < 25:
         if tier_h:
             reason_highlights.append(f"台灣詐騙框架語意（H {tier_h}）")
@@ -173,9 +211,31 @@ def step_fuse_risk_and_ueba(ctx: DefensePipelineContext) -> None:
 
     track_a = {
         "tier_scores": {"H": tier_h, "I": tier_i},
-        "matched_rules": rules_hits_to_dict(ctx.rules_res.hits),
+        "matched_rules": rules_hit_dicts,
         "missing_evidence": list(ctx.missing_evidence),
     }
+
+    risk_fusion: dict[str, Any] = {
+        "mode": ml_meta.get("mode") or "machine_support_bonus_weighted",
+        "llm_weight": dai_risk_llm_weight(),
+        "machine_weight": round(1.0 - dai_risk_llm_weight(), 4),
+        "r_machine_base": machine.r_machine_base,
+        "r_machine_support_bonus": machine.r_machine_support_bonus,
+        "r_machine_final": machine.r_machine_final,
+        "r_llm_100": fusion.r_llm_100,
+        "r_fused_pre_ueba": r_final,
+        "r_final": r_final,
+        "risk_total": risk_score,
+        "hard_guard_applied": fusion.hard_guard_applied,
+        "ueba_guard_applied": ueba_guard,
+        "semantic_floor_applied": semantic_floor > 0 and risk_score >= semantic_floor,
+        "toxic": ctx.toxic_meta,
+    }
+    if ml_meta:
+        risk_fusion["p_fraud"] = ml_meta.get("p_fraud")
+        risk_fusion["model_path"] = ml_meta.get("model_path")
+        risk_fusion["feature_snapshot"] = ml_meta.get("feature_snapshot")
+        risk_fusion["model_version"] = "lr_bank_v0_gd"
 
     report: dict[str, Any] = {
         "risk_score": risk_score,
@@ -191,22 +251,7 @@ def step_fuse_risk_and_ueba(ctx: DefensePipelineContext) -> None:
         "safety_summary": "",
         "archive_note": (str(semantic.get("explanation") or "")[:80] or f"風險 {risk_score}/100"),
         "labels": semantic_labels,
-        "risk_fusion": {
-            "mode": "machine_support_bonus_weighted",
-            "llm_weight": dai_risk_llm_weight(),
-            "machine_weight": round(1.0 - dai_risk_llm_weight(), 4),
-            "r_machine_base": machine.r_machine_base,
-            "r_machine_support_bonus": machine.r_machine_support_bonus,
-            "r_machine_final": machine.r_machine_final,
-            "r_llm_100": fusion.r_llm_100,
-            "r_fused_pre_ueba": r_final,
-            "r_final": r_final,
-            "risk_total": risk_score,
-            "hard_guard_applied": fusion.hard_guard_applied,
-            "ueba_guard_applied": ueba_guard,
-            "semantic_floor_applied": semantic_floor > 0 and risk_score >= semantic_floor,
-            "toxic": ctx.toxic_meta,
-        },
+        "risk_fusion": risk_fusion,
         "semantic": semantic,
         "analysis_payload": ctx.payload,
         "pipeline_phases": list(SMS_REVIEW_DAG),

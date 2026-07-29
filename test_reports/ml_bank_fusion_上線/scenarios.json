@@ -1,0 +1,88 @@
+{
+  "problem_id": "ml_bank_fusion_上線",
+  "status": "fixed",
+  "severity": "high",
+  "source": "test_dialogue/ml_bank_fusion_上線/2026-07-29_Cursor沙盒.md",
+  "description": "DAI 融合接入銀行面 LR（ml_lr）；規則硬擋與 legacy 回歸",
+  "default_severity_on_fail": "fail",
+  "test_design": {
+    "rule": "每輪測試先重跑 baseline，再 experimental，control 獨立確認 legacy／正常通知",
+    "baseline_source": "test_dialogue/ml_bank_fusion_上線/2026-07-29_Cursor沙盒.md"
+  },
+  "scenarios": [
+    {
+      "id": "baseline_bank_otp_ml",
+      "description": "baseline：銀行 OTP 詐騙 → ml_lr 高風險且含 p_fraud",
+      "type": "risk_analysis",
+      "fusion_mode": "ml_lr",
+      "turns": [
+        {
+          "group": "baseline",
+          "ref": "銀行OTP索取",
+          "user": "【玉山銀行】帳戶異常，請回傳動態密碼 123456 完成驗證",
+          "expect": {
+            "verdict_one_of": ["warn", "block"],
+            "min_risk_score": 70,
+            "risk_fusion_mode_contains": "ml",
+            "has_p_fraud": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "experimental_hard_guard",
+      "description": "experimental：規則 90 硬擋，ML 不得洗成 allow",
+      "type": "risk_analysis",
+      "fusion_mode": "ml_lr",
+      "turns": [
+        {
+          "group": "experimental",
+          "ref": "網銀密碼索取",
+          "user": "請立即驗證您的網路銀行密碼並回傳",
+          "expect": {
+            "verdict": "block",
+            "min_risk_score": 85,
+            "hard_guard_or_rules_ge": 85
+          }
+        },
+        {
+          "group": "experimental",
+          "ref": "假銀行釣魚URL",
+          "user": "【台灣銀行】帳戶異常請點 https://secure-twbank-login.test/login 立即驗證否則凍結",
+          "expect": {
+            "verdict_one_of": ["warn", "block"],
+            "min_risk_score": 60,
+            "has_p_fraud": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "control_legacy_and_benign",
+      "description": "control：legacy 模式 + 正常銀行通知",
+      "type": "risk_analysis",
+      "fusion_mode": "legacy",
+      "turns": [
+        {
+          "group": "control",
+          "ref": "legacy仍可評分",
+          "user": "【玉山銀行】帳戶異常，請回傳動態密碼 123456 完成驗證",
+          "expect": {
+            "verdict_one_of": ["warn", "block"],
+            "min_risk_score": 70,
+            "risk_fusion_mode_contains": "machine_support"
+          }
+        },
+        {
+          "group": "control",
+          "ref": "正常入帳通知",
+          "user": "【玉山銀行】您有一筆 NT$500 入帳，如有疑問請洽官方客服。",
+          "expect": {
+            "max_risk_score": 69,
+            "verdict": "allow"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -221,11 +221,42 @@ def main() -> None:
     if not args.no_plots:
         import subprocess
 
-        plot_eval = [sys.executable, str(_ROOT / "scripts" / "plot_risk_model_eval.py"), "--solver", args.solver]
+        plot_dir = out / "eval_plots"
+        plot_eval = [
+            sys.executable,
+            str(_ROOT / "scripts" / "plot_risk_model_eval.py"),
+            "--features",
+            str(args.features),
+            "--model",
+            str(out / "model.pkl"),
+            "--out",
+            str(plot_dir),
+        ]
         subprocess.run(plot_eval, check=False)
         if args.solver == "gd":
             subprocess.run(
-                [sys.executable, str(_ROOT / "scripts" / "plot_gd_loss.py")],
+                [
+                    sys.executable,
+                    str(_ROOT / "scripts" / "plot_gd_loss.py"),
+                    "--loss",
+                    str(out / "loss_history.json"),
+                    "--out",
+                    str(plot_dir),
+                ],
+                check=False,
+            )
+        # 係數視覺化
+        coef_path = out / "coefficients.json"
+        if coef_path.is_file():
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(_ROOT / "scripts" / "plot_lr_coefficients.py"),
+                    "--coefficients",
+                    str(coef_path),
+                    "--out",
+                    str(plot_dir),
+                ],
                 check=False,
             )
 

@@ -37,7 +37,7 @@ def _dataset_subtitle(rows: list[dict[str, str]]) -> str:
     n_test = sum(1 for r in rows if str(r.get("split") or "") == "test")
     return (
         f"共 {n} 筆（答案：scam={n_scam}、benign={n_benign}；"
-        f"train={n_train}、val={n_val}、test={n_test}）｜模擬標註，僅供管線驗證"
+        f"train={n_train}、val={n_val}、test={n_test}）｜合成標註，僅供管線驗證"
     )
 
 
@@ -182,8 +182,12 @@ def plot_label_vs_ml_proba(
 
 def plot_legacy_vs_ml(
     rows: list[dict[str, str]], ml_scores: list[float], out: Path, *, stamp: str = ""
-) -> Path:
+) -> Path | None:
     import matplotlib.pyplot as plt
+
+    if not any(str(r.get("legacy_risk_score") or "").strip() for r in rows):
+        print("skip legacy_vs_ml_score.png（特徵檔無 legacy_risk_score）")
+        return None
 
     fig, ax = plt.subplots(figsize=(7, 7))
 
@@ -409,12 +413,14 @@ def run_eval(
     ml_scores = [round(p * 100, 1) for p in ml_probas]
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    paths = [
+    paths: list[Path] = [
         plot_answer_prediction_distribution(rows, ml_scores, out_dir, stamp=stamp),
         plot_label_vs_ml_proba(rows, ml_scores, out_dir, stamp=stamp),
-        plot_legacy_vs_ml(rows, ml_scores, out_dir, stamp=stamp),
         plot_roc(rows, ml_probas, out_dir, stamp=stamp),
     ]
+    legacy_path = plot_legacy_vs_ml(rows, ml_scores, out_dir, stamp=stamp)
+    if legacy_path is not None:
+        paths.append(legacy_path)
     print(f"模型：{model_path}")
     print(f"標記：{stamp}")
     return paths

@@ -1,4 +1,16 @@
-"""從 DAG 中間結果組 ML 特徵向量。"""
+"""
+從 DAI 風險 DAG 中間結果組固定長度 ML 特徵向量（FEATURE_SPEC_VERSION）。
+
+特徵群：
+- 規則 one-hot：hit_<rule_id>
+- 連續分項：r_rules / r_threat_intel / r_tls / r_toxic_fused / tier_h / tier_i / r_llm_optional
+- 機器衍生：r_machine_*、r_llm_100
+- LLM 標籤 one-hot：lbl_*
+- 結構：text_len、url_count、phone_count、amount_count…
+- UEBA／來源頻道
+
+呼叫端未傳 phones／amounts／urls 時，會以輕量 regex 自正文回填，避免匯出全 0。
+"""
 
 from __future__ import annotations
 
@@ -8,17 +20,24 @@ from typing import Any
 
 from dual_agent.dai.risk_analysis.ml.feature_spec import (
     CONTINUOUS_SCORE_KEYS,
-    MACHINE_DERIVED_KEYS,
     RULE_IDS,
     SEMANTIC_LABEL_KEYS,
     SOURCE_CHANNEL_KEYS,
-    STRUCTURE_KEYS,
-    UEBA_KEYS,
     all_feature_names,
 )
 from dual_agent.dai.risk_analysis.rules import rules_hits_to_dict
 from dual_agent.dai.risk_analysis.verdict import compute_r_machine, scale_llm_score_to_100
 from dual_agent.dai.user_db import compute_user_risk
+
+_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+_PHONE_RE = re.compile(
+    r"(?:\+?886[-\s]?)?0?9\d{2}[-\s]?\d{3}[-\s]?\d{3}"
+    r"|(?:\+?886[-\s]?)?0\d{1,2}[-\s]?\d{3,4}[-\s]?\d{3,4}"
+)
+_AMOUNT_RE = re.compile(
+    r"(?:NT\$|USD\$|\$|美金|新台幣|元)\s*[\d,]+(?:\.\d+)?|[\d,]+\s*(?:元|塊)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -65,6 +84,18 @@ def _source_channel_flags(source: str) -> dict[str, float]:
     return flags
 
 
+def _fallback_urls(text: str) -> list[str]:
+    return [m.group(0).rstrip(".,);]") for m in _URL_RE.finditer(text or "")]
+
+
+def _fallback_phones(text: str) -> list[str]:
+    return [m.group(0) for m in _PHONE_RE.finditer(text or "")]
+
+
+def _fallback_amounts(text: str) -> list[str]:
+    return [m.group(0) for m in _AMOUNT_RE.finditer(text or "")]
+
+
 def extract_features(
     *,
     text: str,
@@ -105,9 +136,9 @@ def extract_features(
     label_set = {_norm_label(x) for x in (sem.get("labels") or []) if _norm_label(x)}
 
     t = (text or "").strip()
-    url_list = list(urls or [])
-    phone_list = list(phones or [])
-    amount_list = list(amounts or [])
+    url_list = list(urls) if urls else _fallback_urls(t)
+    phone_list = list(phones) if phones else _fallback_phones(t)
+    amount_list = list(amounts) if amounts else _fallback_amounts(t)
 
     ur = compute_user_risk(
         text=t,
@@ -159,6 +190,25 @@ def extract_features(
 
     names = all_feature_names()
     return RiskFeatureVector(names=names, values=tuple(values_map[n] for n in names))
+
+
+def features_from_pipeline_context(pipe: Any) -> RiskFeatureVector:
+    """自 DefensePipelineContext 抽取特徵（離線重播用）。"""
+    ents = (pipe.payload or {}).get("entities") or {}
+    hits = rules_hits_to_dict(pipe.rules_res.hits) if pipe.rules_res is not None else []
+    return extract_features(
+        text=pipe.text,
+        component_scores=dict(pipe.component_scores or {}),
+        rules_hits=hits,
+        semantic=dict(pipe.semantic or {}),
+        toxic_meta=dict(pipe.toxic_meta or {}),
+        url_threat_hits=list(pipe.url_threat_hits or []),
+        missing_evidence=list(pipe.missing_evidence or []),
+        source=str(pipe.source or "desktop"),
+        phones=list(ents.get("phones") or []),
+        amounts=list(ents.get("amounts") or []),
+        urls=list(pipe.urls_from_text or []),
+    )
 
 
 def features_from_pipeline_context(pipe: Any) -> RiskFeatureVector:

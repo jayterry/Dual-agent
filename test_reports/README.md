@@ -9,6 +9,7 @@
 |--------|----------|------|----------|
 | [`agent_full_coverage`](./agent_full_coverage/) | 全流程煙霧測試（Ingress／Router／CAI／DAI／Memory） | **open** | 2026-07-12 |
 | [`pending_review_無法取消`](./pending_review_無法取消/) | 拒絕送審或改話題後 `pending_review` 未清除 | **已修** | 2026-07-12 |
+| [`ml_bank_fusion_上線`](./ml_bank_fusion_上線/) | DAI `ml_lr` 融合上線；規則硬擋與 legacy 回歸 | **open** | 2026-07-29 |
 
 ## 新增問題回報
 
@@ -34,5 +35,6 @@ python scripts/run_problem_reports_audit.py
 | `ingress` | `normalize_ingress` 邊界 |
 | `semantic_router` | router / apply 覆寫 |
 | `memory_multiturn` | 記憶記住／確認／回想（mock parse_fn） |
+| `risk_analysis` | DAI `run_risk_analysis`（融合模式／分數／verdict） |
 
 詳見 [`_template/scenarios.json`](./_template/scenarios.json)。
