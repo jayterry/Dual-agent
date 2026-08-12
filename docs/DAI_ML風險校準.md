@@ -43,6 +43,8 @@
 
 Route B 與 Route C **可並行 shadow**；標註充足後，Route C 的 `feature_extractor` 應**優先吃** Route B 的結構化輸出與嵌入特徵，而非僅 one-hot 規則。
 
+**與 CAI 對齊**：Route B 的 KEA/TAPE/增強嵌入與 CAI Ingress、`semantic_router` 共用語意能力層（見 [語意分析改善計畫 §1.2](./語意分析改善計畫.md)）；DAI 解讀**待審正文威脅**，CAI 解讀**使用者任務意圖**，底層同一套標準。
+
 ---
 
 ## 一、專案目標
