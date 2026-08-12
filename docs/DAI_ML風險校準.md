@@ -1,8 +1,47 @@
 # DAI 風險評分 ML 校準
 
-> 最後更新：2026-06-03  
-> 狀態：**規劃中**（尚無標註資料，待 Bootstrap 資料集後進入 Phase 1）  
-> 相關文件：[RISK_SCORING.md](./RISK_SCORING.md)（現行公式）、[專案進度與目標.md](./專案進度與目標.md)
+> 最後更新：2026-08-12  
+> 狀態：**規劃中**（雙路線並行：Route B LLM 語意路線 + Route C ML 校準；尚無大量標註，ML Phase 1 待 Bootstrap）  
+> 相關文件：[RISK_SCORING.md](./RISK_SCORING.md)、[語意分析改善計畫.md](./語意分析改善計畫.md)（§1.1、§4.4）
+
+---
+
+## 〇、雙路線定案（與語意分析改善計畫對齊）
+
+**維持雙路線，不互相取代。** 共用規則底線與機器層（rules、TI、TLS、toxic）；融合層依模式切換。
+
+| 路線 | `DAI_RISK_FUSION_MODE` | 核心做法 | 本文件章節 |
+|------|------------------------|----------|------------|
+| **Legacy** | `legacy`（預設） | 人工權重 + `semantic_llm` H/I | 二、現況 |
+| **B. LLM 語意** | `enhanced_embed`（規劃） | **KEA + TAPE → 文本增強 → 深度句嵌入** | **〇.1** |
+| **C. ML 校準** | `ml_lr` / `ml_rf` | 特徵向量 + LR／RF → `p_fraud` | 三～七 |
+
+```
+簡訊/通知正文 + 機器層分項
+        │
+        ▼
+   規則底線（Tier 90、hard guard）─── 兩路皆不可繞過
+        │
+        ├─► Route B：kea_tape_llm ──► enhanced_text ──► embed ──► r_embed + 規則融合
+        │
+        └─► Route C：KEA/TAPE/機器/嵌入特徵 ──► feature_extractor ──► LR/RF ──► p_fraud
+```
+
+**LLM 路線交付標準**：必須實作 KEA（實體、意圖假設、關鍵片語）與 TAPE（模式、人話解釋），並對**增強後文本**做嵌入比對；**不以僅輸出 H/I labels 為長期終點**（`semantic_llm` 為過渡）。詳見 [語意分析改善計畫 §4.4](./語意分析改善計畫.md)。
+
+### 〇.1 Route B：KEA / TAPE + 文本增強嵌入（LLM 主交付）
+
+| 步驟 | 說明 |
+|------|------|
+| 1. KEA | 背景 LLM：抽取實體（URL、電話…）、意圖假設（如假冒親友）、`keyphrases`；`text` 須為原文子字串 |
+| 2. TAPE | 同次 JSON：`patterns[]`、`tape_summary`（風險卡用）；**不**輸出最終 `risk_score` |
+| 3. 文本增強 | `enhanced_text = 原文 + 【KEA】+ 【TAPE】` 固定模板 |
+| 4. 深度句嵌入 | `embed(enhanced_text)`；與詐騙／正常話術原型庫 cosine（Chroma，類 `toxic_chroma`） |
+| 5. 融合 | `r_embed_enhanced` + 機器層 + 規則護欄 → `risk_score` |
+
+環境變數（規劃）：`DAI_TEXT_ENHANCE=1`、`DAI_RISK_FUSION_MODE=enhanced_embed`。實作掛點見語意分析改善計畫 **P3b**、`kea_tape_llm.py`。
+
+Route B 與 Route C **可並行 shadow**；標註充足後，Route C 的 `feature_extractor` 應**優先吃** Route B 的結構化輸出與嵌入特徵，而非僅 one-hot 規則。
 
 ---
 
@@ -12,22 +51,25 @@
 
 **參考案例**：Stripe Radar（交易詐欺風險評分）。我們**不完全複製**，而是借鑑其 **「規則底線 + 特徵工程 + ML 校準」** 概念，並因應**文字訊息**場景融入 LLM。
 
-### 三層架構（已定案）
+### 三層架構（規則 + 雙路融合）
 
 | 層級 | 職責 |
 |------|------|
-| **Rule Engine** | 安全底線；高風險規則硬擋，ML 不得洗低 |
-| **LLM** | 語意理解、詐騙類型與風險標籤抽取 → 轉成 ML 特徵 |
-| **ML** | 權重校準與分類；Phase 1 Logistic Regression，Phase 2 Random Forest |
+| **Rule Engine** | 安全底線；高風險規則硬擋，**兩路皆不得洗低** |
+| **Route B：LLM 語意** | KEA + TAPE + 增強文本嵌入 → `r_embed`／結構化特徵 |
+| **Route C：ML** | 特徵向量 + LR/RF 校準 → `p_fraud`（可含 Route B 產出特徵） |
 
 ```
 簡訊/通知/URL 正文
     │
-    ├─► Rule Engine ──┐
-    ├─► LLM 特徵生成 ─┼─► Feature Vector ──► ML ──► risk_score + verdict
-    │                 │
-    └─► hard guard ───┘（規則覆寫 ML 灰色地帶）
+    ├─► Rule Engine ────────────────┐
+    ├─► Route B：KEA/TAPE + embed ──┼─► 融合（mode 分支）──► risk_score + verdict
+    ├─► Route C：Feature Vector ──► ML ─┘
+    │
+    └─► hard guard（規則覆寫灰色地帶）
 ```
+
+**差異（相對初版）**：LLM 不再僅「標籤 → ML 特徵」；**Route B 可獨立融合上線**；Route C 待標註後與 Route B shadow 對照。
 
 ### 與 Stripe Radar 對照
 
@@ -191,8 +233,10 @@ python scripts/train_risk_lr.py \
 
 | 環境變數 | 預設 | 說明 |
 |----------|------|------|
-| `DAI_RISK_FUSION_MODE` | `legacy` | `legacy` \| `ml_lr` \| `ml_rf` |
-| `DAI_ML_MODEL_PATH` | — | 模型 `.pkl` 路徑 |
+| `DAI_RISK_FUSION_MODE` | `legacy` | `legacy` \| `enhanced_embed` \| `ml_lr` \| `ml_rf` |
+| `DAI_ML_MODEL_PATH` | — | Route C：模型 `.pkl` 路徑 |
+| `DAI_TEXT_ENHANCE` | `0` | Route B：啟用 KEA/TAPE 文本增強 |
+| `DAI_EMBED_ENHANCED_TEXT` | `1` | Route B：對 `enhanced_text` 嵌入 |
 
 報告擴充範例：
 
@@ -205,13 +249,18 @@ python scripts/train_risk_lr.py \
 }
 ```
 
-### 6.3 LLM 角色調整
+### 6.3 LLM 角色（Route B：KEA / TAPE）
 
-擴充 `semantic_llm.py`：
+擴充／取代現有 `semantic_llm.py` 為 `kea_tape_llm.py`（或在其上升級）：
 
-- 輸出結構化 `fraud_types[]` + 各類 `confidence`（0–1）
+- **KEA**：`entities[]`、`keyphrases[]`、`intent_hypotheses[]`（如假冒親友、可疑連結）
+- **TAPE**：`patterns[]`、`tape_summary`；供風險卡與 audit
+- **文本增強**：拼接後 `embed(enhanced_text)`；話術原型 Chroma
 - **禁止** LLM 直接輸出最終 `risk_score`
-- `ml_*` 模式下停用 `semantic_floor_from_labels`（或僅 fallback），避免與 ML 雙重抬分
+- `ml_*` 模式下：Route B 結構化欄位進 `feature_extractor`；停用或收斂 `semantic_floor`，避免雙重抬分
+- `enhanced_embed` 模式：以 `r_embed_enhanced` + 規則融合為主；`semantic_llm` 純 H/I 逐步退役
+
+詳細規格：[語意分析改善計畫 §4.4](./語意分析改善計畫.md)。
 
 ### 6.4 門檻
 
@@ -252,40 +301,57 @@ python scripts/train_risk_lr.py \
 
 ---
 
-## 十、實作順序（4 PR）
+## 十、實作順序（雙路線 PR）
 
 ```
 PR1  標註 schema + feature_extractor + export_risk_features + 種子標註
-PR2  LLM 結構化 fraud_types + train_risk_lr + eval
-PR3  pipeline 整合 ml_fusion + env 開關 + 測試
-PR4  （資料達標）train_risk_rf + 門檻校準 + 文件同步
+PR2a Route B：kea_tape_llm + enhanced_text + scam_prototype_chroma + enhanced_embed 融合（語意分析 P3b）
+PR2b Route C：train_risk_lr + eval（可消費 PR2a 特徵）
+PR3   pipeline 整合（legacy / enhanced_embed / ml_lr 開關）+ shadow 對照 + 測試
+PR4   （資料達標）train_risk_rf + 門檻校準 + RISK_SCORING 文件同步
 ```
+
+**優先序**：Route B（KEA/TAPE+嵌入）與 PR1 種子標註可並行；Route C 訓練不依賴 Route B 上線，但特徵應對齊 Route B 輸出。
 
 ---
 
 ## 十一、待辦清單
 
-| ID | 內容 | 狀態 |
-|----|------|------|
-| dataset-schema | 標註 schema + 匯入工具 + 種子資料 | pending |
-| feature-extractor | `ml/feature_extractor.py` | pending |
-| llm-feature-gen | semantic_llm 結構化 fraud_types | pending |
-| offline-replay | `export_risk_features.py` | pending |
-| train-lr | `train_risk_lr.py` | pending |
-| integrate-ml-fusion | `DAI_RISK_FUSION_MODE` 管線整合 | pending |
-| eval-harness | 測試 + 離線評估報告 | pending |
-| train-rf | `train_risk_rf.py`（Phase 2） | pending |
-| docs-ml | 更新 RISK_SCORING.md 融合章節 | pending |
+| ID | 內容 | 路線 | 狀態 |
+|----|------|------|------|
+| dataset-schema | 標註 schema + 匯入工具 + 種子資料 | C | pending |
+| feature-extractor | `ml/feature_extractor.py`（含 KEA/TAPE/embed 特徵） | C | pending |
+| kea-tape-llm | `kea_tape_llm.py` + 文本增強 + `enhanced_embed` 融合 | **B** | pending |
+| scam-prototype-chroma | 話術原型庫 + Chroma 比對 | **B** | pending |
+| llm-feature-gen | KEA/TAPE 結構化輸出（取代僅 fraud_types） | B→C | pending |
+| offline-replay | `export_risk_features.py` | C | pending |
+| train-lr | `train_risk_lr.py` | C | pending |
+| integrate-fusion-modes | `legacy` / `enhanced_embed` / `ml_lr` 管線整合 | B+C | pending |
+| eval-harness | 測試 + 離線評估（含 embed raw vs enhanced ablation） | B+C | pending |
+| train-rf | `train_risk_rf.py`（Phase 2） | C | pending |
+| docs-ml | 更新 RISK_SCORING.md 融合章節 | — | pending |
 
 ---
 
 ## 十二、驗收標準
 
-1. 種子資料 ≥ **600** 筆（scam + benign）可完成 LR 訓練。
-2. Validation **AUC > legacy** 融合基線（同 val set）。
-3. `ml_lr` 模式下 `call_dai` 輸出含 `p_fraud` 與 `feature_snapshot`。
-4. Tier 90 規則命中時，最終 `verdict` 不得為 `allow`。
-5. `legacy` 模式與現行行為一致。
+### Route B（`enhanced_embed`）
+
+1. KEA 實體 `text` 原文子字串率 ≥ **95%**（回歸集）。
+2. `embed(enhanced)` 對照 `embed(raw)`：詐騙召回 ↑ 或正常誤報 ↓（Phase 0 對照集）。
+3. `tape_summary` 進風險卡；LLM **不**輸出最終 `risk_score`。
+4. Tier 90 規則命中時，`verdict` 不得為 `allow`。
+
+### Route C（`ml_lr` / `ml_rf`）
+
+5. 種子資料 ≥ **600** 筆可完成 LR 訓練。
+6. Validation **AUC > legacy**（同 val set）。
+7. `ml_lr` 輸出含 `p_fraud` 與 `feature_snapshot`。
+
+### 共通
+
+8. `legacy` 模式與現行行為一致。
+9. 三路模式可 shadow 對照，一鍵切換 `DAI_RISK_FUSION_MODE`。
 
 ---
 
@@ -293,9 +359,10 @@ PR4  （資料達標）train_risk_rf + 門檻校準 + 文件同步
 
 | 主線 | 關係 |
 |------|------|
-| Ingress 複合動作誤排（Phase 0） | 建議先修；benign 種子需含工作指令句，避免訓練假陽性 |
+| [語意分析改善計畫](./語意分析改善計畫.md) | **Route B 規格主文件**（§1.1、§4.4、P3b）；雙路線定案 |
+| Ingress 複合動作誤排（Phase 0） | 建議先修；benign 種子需含工作指令句 |
 | 公司知識圖譜 / 組織圖 | 正交，可並行 |
-| 現行 RISK_SCORING.md | ML 上線後新增 `ml_logistic_v1` / `ml_rf_v1` 融合模式章節 |
+| 現行 RISK_SCORING.md | 上線後新增 `enhanced_embed`、`ml_logistic_v1` 章節 |
 
 ---
 
@@ -305,6 +372,10 @@ PR4  （資料達標）train_risk_rf + 門檻校準 + 文件同步
 |------|------|
 | `dual_agent/dai/risk_analysis/verdict.py` | 融合與判定（改造主檔） |
 | `dual_agent/dai/skills/_pipeline_steps.py` | `step_fuse_risk_and_ueba` |
-| `dual_agent/dai/risk_analysis/semantic_llm.py` | LLM 特徵生成 |
+| `dual_agent/dai/risk_analysis/semantic_llm.py` | Legacy H/I（過渡） |
+| `dual_agent/dai/risk_analysis/kea_tape_llm.py` | Route B：KEA/TAPE（規劃） |
+| `dual_agent/dai/toxic_chroma.py` | 嵌入比對參考實作 |
+| `data/scam_prototypes/` | 話術原型庫（規劃） |
+| `docs/語意分析改善計畫.md` | Route B 完整規格 |
 | `dual_agent/dai/risk_analysis/rules.py` | 規則引擎 |
 | `docs/RISK_SCORING.md` | 現行公式完整說明 |
