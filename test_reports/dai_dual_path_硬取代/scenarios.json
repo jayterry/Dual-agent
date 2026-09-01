@@ -1,0 +1,94 @@
+{
+  "problem_id": "dai_dual_path_硬取代",
+  "status": "open",
+  "severity": "high",
+  "source": "test_dialogue/dai_dual_path_硬取代/",
+  "description": "DAI 主路徑硬取代為雙路 Path A/B；CAI gate=max(threat,context)",
+  "default_severity_on_fail": "fail",
+  "test_design": {
+    "rule": "預設關閉 Path B／Narrator（無需 Ollama）；只驗 Path A 與 gate 契約",
+    "baseline_source": "test_reports/dai_dual_path_硬取代/測試回報.md"
+  },
+  "scenarios": [
+    {
+      "id": "baseline_otp_path_a",
+      "description": "baseline：銀行 OTP → fraud_dual 高風險",
+      "type": "risk_analysis",
+      "fusion_mode": "legacy",
+      "dual_path_b": false,
+      "dual_narrator": false,
+      "turns": [
+        {
+          "group": "baseline",
+          "ref": "銀行OTP",
+          "user": "【玉山銀行】帳戶異常，請回傳動態密碼 123456 完成驗證",
+          "expect": {
+            "engine": "fraud_dual",
+            "verdict_one_of": ["warn", "block"],
+            "min_risk_score": 55,
+            "has_path_a": true,
+            "path_a_has_reasons": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "experimental_password_and_persona",
+      "description": "experimental：帳密索取 + 高齡 persona",
+      "type": "risk_analysis",
+      "dual_path_b": false,
+      "dual_narrator": false,
+      "persona": {
+        "age_band": "60+",
+        "occupation": "retired",
+        "relation_type": "Unknown",
+        "channel": "SMS",
+        "primary_apps": ["SMS"],
+        "invest_exp": "none"
+      },
+      "turns": [
+        {
+          "group": "experimental",
+          "ref": "網銀密碼",
+          "user": "請立即驗證您的網路銀行密碼並回傳",
+          "expect": {
+            "engine": "fraud_dual",
+            "has_path_a": true,
+            "min_risk_score": 20,
+            "path_a_has_reasons": true
+          }
+        },
+        {
+          "group": "experimental",
+          "ref": "投資誘導高齡",
+          "user": "老師帶單穩賺不賠，今天進場保證翻倍，私訊領教學",
+          "expect": {
+            "engine": "fraud_dual",
+            "has_path_a": true,
+            "min_risk_score": 25
+          }
+        }
+      ]
+    },
+    {
+      "id": "control_benign_and_engine",
+      "description": "control：正常通知偏 allow；engine 固定",
+      "type": "risk_analysis",
+      "dual_path_b": false,
+      "dual_narrator": false,
+      "turns": [
+        {
+          "group": "control",
+          "ref": "正常入帳",
+          "user": "【玉山銀行】您有一筆 NT$500 入帳，如有疑問請洽官方客服。",
+          "expect": {
+            "engine": "fraud_dual",
+            "has_path_a": true,
+            "max_risk_score": 75,
+            "verdict_one_of": ["allow", "warn"]
+          }
+        }
+      ]
+    }
+  ]
+}

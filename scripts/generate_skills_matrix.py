@@ -131,7 +131,7 @@ def generate() -> str:
     all_catalog = {n for rows in sections.values() for n, _ in rows}
 
     lines: list[str] = [
-        "# Dual-agent Skills 對照矩陣",
+        "# ScamSentinel Skills 對照矩陣",
         "",
         "本文件由 `scripts/generate_skills_matrix.py` 自動產生，對照：",
         "",

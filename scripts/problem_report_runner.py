@@ -467,7 +467,7 @@ def _run_risk_analysis_scenario(
     scenario: dict[str, Any],
     default_severity: str,
 ) -> None:
-    """直接跑 DAI run_risk_analysis（可設 fusion_mode；關閉 semantic LLM）。"""
+    """直接跑 DAI run_risk_analysis（可設 fusion_mode／雙路開關；關閉 semantic LLM）。"""
     import os
 
     from dual_agent.dai.risk_analysis.pipeline import run_risk_analysis
@@ -477,8 +477,15 @@ def _run_risk_analysis_scenario(
     fusion_mode = str(scenario.get("fusion_mode") or "legacy")
     prev_mode = os.environ.get("DAI_RISK_FUSION_MODE")
     prev_sem = os.environ.get("DAI_SEMANTIC_LLM")
+    prev_pb = os.environ.get("DAI_DUAL_PATH_B")
+    prev_nr = os.environ.get("DAI_DUAL_NARRATOR")
     os.environ["DAI_RISK_FUSION_MODE"] = fusion_mode
     os.environ["DAI_SEMANTIC_LLM"] = "0"
+    if "dual_path_b" in scenario:
+        os.environ["DAI_DUAL_PATH_B"] = "1" if scenario.get("dual_path_b") else "0"
+    if "dual_narrator" in scenario:
+        os.environ["DAI_DUAL_NARRATOR"] = "1" if scenario.get("dual_narrator") else "0"
+    persona = scenario.get("persona") if isinstance(scenario.get("persona"), dict) else {}
     try:
         for turn in scenario.get("turns") or []:
             user_text = str(turn["user"])
@@ -487,15 +494,34 @@ def _run_risk_analysis_scenario(
             severity = str(
                 turn.get("severity_on_fail") or scenario.get("severity_on_fail") or default_severity
             )
+            turn_persona = dict(persona)
+            if isinstance(turn.get("persona"), dict):
+                turn_persona.update(turn["persona"])
             report = run_risk_analysis(
-                DAIRequest(user_text=user_text, artifact=user_text, sms_review=True, source="audit"),
+                DAIRequest(
+                    user_text=user_text,
+                    artifact=user_text,
+                    sms_review=True,
+                    source="audit",
+                    persona=turn_persona,
+                ),
             )
             score = int(report.get("risk_score") or 0)
             verdict = str(report.get("verdict") or "")
             rf = report.get("risk_fusion") if isinstance(report.get("risk_fusion"), dict) else {}
             mode = str(rf.get("mode") or "")
             r_rules = int((report.get("component_scores") or {}).get("r_rules") or 0)
+            path_a = report.get("path_a") if isinstance(report.get("path_a"), dict) else None
+            engine = str(report.get("engine") or "")
 
+            if "engine" in expect and engine != str(expect["engine"]):
+                result.add(
+                    sid,
+                    user_text,
+                    severity,
+                    f"engine 應為 {expect['engine']}；實際 {engine}",
+                    group,
+                )
             if "verdict" in expect and verdict != str(expect["verdict"]):
                 result.add(sid, user_text, severity, f"verdict 應為 {expect['verdict']}；實際 {verdict}", group)
             allowed = list(expect.get("verdict_one_of") or [])
@@ -538,6 +564,12 @@ def _run_risk_analysis_scenario(
                         f"硬擋／分數應 ≥ {need}（r_rules={r_rules}, score={score}）",
                         group,
                     )
+            if expect.get("has_path_a") and not path_a:
+                result.add(sid, user_text, severity, "report 應含 path_a", group)
+            if expect.get("path_a_has_reasons") and path_a:
+                reasons = path_a.get("reasons") or []
+                if not reasons:
+                    result.add(sid, user_text, severity, "path_a.reasons 不可為空", group)
     finally:
         if prev_mode is None:
             os.environ.pop("DAI_RISK_FUSION_MODE", None)
@@ -547,6 +579,14 @@ def _run_risk_analysis_scenario(
             os.environ.pop("DAI_SEMANTIC_LLM", None)
         else:
             os.environ["DAI_SEMANTIC_LLM"] = prev_sem
+        if prev_pb is None:
+            os.environ.pop("DAI_DUAL_PATH_B", None)
+        else:
+            os.environ["DAI_DUAL_PATH_B"] = prev_pb
+        if prev_nr is None:
+            os.environ.pop("DAI_DUAL_NARRATOR", None)
+        else:
+            os.environ["DAI_DUAL_NARRATOR"] = prev_nr
 
 
 def run_problem_scenarios(problem_dir: Path, spec: dict[str, Any]) -> ProblemAuditResult:

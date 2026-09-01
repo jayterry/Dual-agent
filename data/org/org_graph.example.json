@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "root_employee_id": "emp_ceo",
+  "departments": {
+    "dept_exec": { "id": "dept_exec", "name": "管理層" },
+    "dept_product": { "id": "dept_product", "name": "產品部" },
+    "dept_engineering": { "id": "dept_engineering", "name": "工程部" },
+    "dept_hr": { "id": "dept_hr", "name": "人資部" }
+  },
+  "employees": {
+    "emp_ceo": {
+      "id": "emp_ceo",
+      "name": "陳大明",
+      "title": "執行長",
+      "department_id": "dept_exec"
+    },
+    "emp_product_head": {
+      "id": "emp_product_head",
+      "name": "林雅婷",
+      "title": "產品部主管",
+      "department_id": "dept_product"
+    },
+    "emp_eng_head": {
+      "id": "emp_eng_head",
+      "name": "王志豪",
+      "title": "工程部主管",
+      "department_id": "dept_engineering"
+    },
+    "emp_hr_head": {
+      "id": "emp_hr_head",
+      "name": "張美玲",
+      "title": "人資部主管",
+      "department_id": "dept_hr"
+    },
+    "emp_pm_a": {
+      "id": "emp_pm_a",
+      "name": "李宥辰",
+      "title": "產品經理",
+      "department_id": "dept_product"
+    },
+    "emp_pm_b": {
+      "id": "emp_pm_b",
+      "name": "周品妍",
+      "title": "產品經理",
+      "department_id": "dept_product"
+    },
+    "emp_eng_a": {
+      "id": "emp_eng_a",
+      "name": "吳承恩",
+      "title": "資深工程師",
+      "department_id": "dept_engineering"
+    },
+    "emp_eng_b": {
+      "id": "emp_eng_b",
+      "name": "鄭雅文",
+      "title": "後端工程師",
+      "department_id": "dept_engineering"
+    },
+    "emp_hr_a": {
+      "id": "emp_hr_a",
+      "name": "許佳慧",
+      "title": "人資專員",
+      "department_id": "dept_hr"
+    }
+  },
+  "edges": [
+    { "from": "emp_product_head", "to": "emp_ceo", "type": "reports_to" },
+    { "from": "emp_eng_head", "to": "emp_ceo", "type": "reports_to" },
+    { "from": "emp_hr_head", "to": "emp_ceo", "type": "reports_to" },
+    { "from": "emp_pm_a", "to": "emp_product_head", "type": "reports_to" },
+    { "from": "emp_pm_b", "to": "emp_product_head", "type": "reports_to" },
+    { "from": "emp_eng_a", "to": "emp_eng_head", "type": "reports_to" },
+    { "from": "emp_eng_b", "to": "emp_eng_head", "type": "reports_to" },
+    { "from": "emp_hr_a", "to": "emp_hr_head", "type": "reports_to" }
+  ]
+}

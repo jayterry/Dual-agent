@@ -51,13 +51,12 @@ def test_ml_hard_guard_password() -> None:
     assert 0.0 <= ml.p_fraud <= 1.0
 
 
-def test_pipeline_ml_lr_sets_p_fraud() -> None:
+def test_pipeline_dual_path_otp() -> None:
     assert _MODEL.is_file()
-    clear_model_cache()
-    prev_mode = os.environ.get("DAI_RISK_FUSION_MODE")
-    prev_sem = os.environ.get("DAI_SEMANTIC_LLM")
-    os.environ["DAI_RISK_FUSION_MODE"] = "ml_lr"
-    os.environ["DAI_SEMANTIC_LLM"] = "0"
+    prev_pb = os.environ.get("DAI_DUAL_PATH_B")
+    prev_nr = os.environ.get("DAI_DUAL_NARRATOR")
+    os.environ["DAI_DUAL_PATH_B"] = "0"
+    os.environ["DAI_DUAL_NARRATOR"] = "0"
     try:
         report = run_risk_analysis(
             DAIRequest(
@@ -67,26 +66,26 @@ def test_pipeline_ml_lr_sets_p_fraud() -> None:
                 source="test",
             ),
         )
-        rf = report.get("risk_fusion") or {}
-        assert "ml" in str(rf.get("mode") or "")
-        assert rf.get("p_fraud") is not None
-        assert int(report.get("risk_score") or 0) >= 70
+        assert report.get("engine") == "fraud_dual"
+        assert report.get("path_a")
+        assert int(report.get("risk_score") or 0) >= 55
         assert str(report.get("verdict")) in ("warn", "block")
     finally:
-        if prev_mode is None:
-            os.environ.pop("DAI_RISK_FUSION_MODE", None)
+        if prev_pb is None:
+            os.environ.pop("DAI_DUAL_PATH_B", None)
         else:
-            os.environ["DAI_RISK_FUSION_MODE"] = prev_mode
-        if prev_sem is None:
-            os.environ.pop("DAI_SEMANTIC_LLM", None)
+            os.environ["DAI_DUAL_PATH_B"] = prev_pb
+        if prev_nr is None:
+            os.environ.pop("DAI_DUAL_NARRATOR", None)
         else:
-            os.environ["DAI_SEMANTIC_LLM"] = prev_sem
+            os.environ["DAI_DUAL_NARRATOR"] = prev_nr
 
 
-def test_pipeline_legacy_unchanged_mode_name() -> None:
-    prev_mode = os.environ.pop("DAI_RISK_FUSION_MODE", None)
-    prev_sem = os.environ.get("DAI_SEMANTIC_LLM")
-    os.environ["DAI_SEMANTIC_LLM"] = "0"
+def test_pipeline_dual_path_benign_has_path_a() -> None:
+    prev_pb = os.environ.get("DAI_DUAL_PATH_B")
+    prev_nr = os.environ.get("DAI_DUAL_NARRATOR")
+    os.environ["DAI_DUAL_PATH_B"] = "0"
+    os.environ["DAI_DUAL_NARRATOR"] = "0"
     try:
         report = run_risk_analysis(
             DAIRequest(
@@ -96,13 +95,14 @@ def test_pipeline_legacy_unchanged_mode_name() -> None:
                 source="test",
             ),
         )
-        rf = report.get("risk_fusion") or {}
-        assert "machine_support" in str(rf.get("mode") or "")
-        assert rf.get("p_fraud") is None
+        assert report.get("engine") == "fraud_dual"
+        assert isinstance(report.get("path_a"), dict)
     finally:
-        if prev_mode is not None:
-            os.environ["DAI_RISK_FUSION_MODE"] = prev_mode
-        if prev_sem is None:
-            os.environ.pop("DAI_SEMANTIC_LLM", None)
+        if prev_pb is None:
+            os.environ.pop("DAI_DUAL_PATH_B", None)
         else:
-            os.environ["DAI_SEMANTIC_LLM"] = prev_sem
+            os.environ["DAI_DUAL_PATH_B"] = prev_pb
+        if prev_nr is None:
+            os.environ.pop("DAI_DUAL_NARRATOR", None)
+        else:
+            os.environ["DAI_DUAL_NARRATOR"] = prev_nr

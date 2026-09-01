@@ -1,8 +1,10 @@
 """
-Dual-agent 里程碑一：桌面 CAI（交流 + Plan & Execute）。
+ScamSentinel 桌面介面（Tkinter 備援）。
 
-實作於本倉庫 `dual_agent` 套件內；**執行時不依賴**工作區內其他僅供人閱讀之參考資料夾。
-執行前請安裝 `requirements.txt`，並確保 Ollama 可用。
+正式桌面殼請優先用 PySide6：
+  python desktop_cai_qt.py
+
+主畫面只顯示對話；建圖在設定；不露出計畫／技能／Ollama 內部細節。
 
   cd Dual-agent
   python desktop_cai_app.py
@@ -15,13 +17,29 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import scrolledtext, ttk
+from tkinter import font as tkfont
+from tkinter import ttk
 from typing import Any
 
-# 確保以「Dual-agent」目錄為根時可 import dual_agent
 _ROOT = Path(__file__).resolve().parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+
+_UI = {
+    "bg": "#F5F6F8",
+    "surface": "#FFFFFF",
+    "border": "#CBD5E1",
+    "text": "#111827",
+    "muted": "#6B7280",
+    "accent": "#0F766E",
+    "accent_hover": "#0D9488",
+    "user_bg": "#DDF3EF",
+    "input_bg": "#FFFFFF",
+    "busy": "#B45309",
+    "placeholder": "#9CA3AF",
+}
+
+_PLACEHOLDER = "輸入訊息或貼上簡訊…（Ctrl+Enter 送出）"
 
 
 def _extract_latest_call_dai_payload(results: list[Any]) -> dict[str, Any] | None:
@@ -35,95 +53,77 @@ def _extract_latest_call_dai_payload(results: list[Any]) -> dict[str, Any] | Non
     return None
 
 
-def _build_dai_result_block(results: list[Any]) -> str:
+def _user_facing_dai_block(results: list[Any]) -> str:
+    """使用者可見的風險摘要（無內部欄位名堆砌）。"""
     dai = _extract_latest_call_dai_payload(results)
     if not dai:
         return ""
 
-    lines = ["【DAI 風險摘要】"]
+    lines: list[str] = []
+    path_a = dai.get("path_a") if isinstance(dai.get("path_a"), dict) else None
+    path_b = dai.get("path_b") if isinstance(dai.get("path_b"), dict) else None
+
     score = dai.get("risk_score")
-    if isinstance(score, (int, float)):
-        lines.append(f"風險分數：{int(score)}/100")
+    verdict = str(dai.get("verdict") or "").strip()
+    if isinstance(score, (int, float)) or verdict:
+        head = "風險評估"
+        if isinstance(score, (int, float)):
+            head += f"：{int(score)}/100"
+        if verdict:
+            head += f"（{verdict}）"
+        lines.append(head)
 
-    action = str(dai.get("recommended_cai_action") or "").strip()
-    if action:
-        lines.append(f"建議動作：{action}")
+    if path_a:
+        lines.append("")
+        lines.append("路徑 A（機器分析）")
+        lines.append(
+            f"威脅 {path_a.get('threat_score_100', '—')}/100　"
+            f"情境 {path_a.get('context_score_100', '—')}/100"
+        )
+        if path_a.get("scam_type"):
+            lines.append(f"類型：{path_a.get('scam_type')}")
+        for r in (path_a.get("reasons") or [])[:4]:
+            lines.append(f"· {r}")
+        for w in (path_a.get("warnings") or [])[:2]:
+            lines.append(f"⚠ {w}")
 
-    summary = str(dai.get("safety_summary") or "").strip()
-    if summary:
-        lines.append(f"摘要：{summary[:300]}")
+    if path_b and not path_b.get("skipped"):
+        lines.append("")
+        lines.append("路徑 B（語意對照）")
+        lines.append(
+            f"威脅 {path_b.get('threat_score_100', '—')}/100　"
+            f"情境 {path_b.get('context_score_100', '—')}/100"
+        )
+        for r in (path_b.get("reasons") or [])[:3]:
+            lines.append(f"· {r}")
+    elif path_b and path_b.get("skipped"):
+        # 正式介面：略過細節，不噴 stack／host
+        pass
 
-    reasons = dai.get("reason_highlights") or []
-    if isinstance(reasons, list):
-        picked = [str(x).strip()[:160] for x in reasons if str(x).strip()][:3]
-        if picked:
-            lines.append("主要原因：")
-            lines.extend(f"- {x}" for x in picked)
+    narrator = str(dai.get("narrator_text") or "").strip()
+    if narrator:
+        lines.append("")
+        lines.append(narrator[:400])
+    else:
+        summary = str(dai.get("safety_summary") or "").strip()
+        if summary and not path_a:
+            lines.append(summary[:300])
 
-    return "\n".join(lines)
-
-
-def _clip_step_text(value: Any, *, max_chars: int = 80) -> str:
-    s = " ".join(str(value or "").strip().split())
-    if len(s) <= max_chars:
-        return s
-    return s[: max_chars - 1] + "…"
-
-
-def _display_step_args(skill: str, args: dict[str, Any]) -> dict[str, Any]:
-    if skill == "ask_user":
-        return {"question": _clip_step_text(args.get("question"), max_chars=80)}
-    if skill in ("open_url", "open_url_readonly"):
-        return {"url": args.get("url")}
-    if skill == "search_web":
-        return {"query": _clip_step_text(args.get("query"), max_chars=80)}
-    if skill == "weather":
-        return {
-            "location": _clip_step_text(args.get("location"), max_chars=60),
-            "format": args.get("format"),
-        }
-    if skill == "instant_answer":
-        return {"query": _clip_step_text(args.get("query"), max_chars=80)}
-    if skill == "fetch_url":
-        return {"url": _clip_step_text(args.get("url"), max_chars=100)}
-    if skill == "open_app":
-        return {"name": args.get("name"), "path": args.get("path")}
-    if skill == "call_dai":
-        shown: dict[str, Any] = {}
-        artifact = _clip_step_text(args.get("artifact"), max_chars=120)
-        user_text = _clip_step_text(args.get("user_text"), max_chars=80)
-        if artifact:
-            shown["artifact"] = artifact
-        if user_text:
-            shown["user_text"] = user_text
-        if "sms_review" in args:
-            shown["sms_review"] = bool(args.get("sms_review"))
-        if args.get("context_pack"):
-            shown["context_pack"] = "（已省略）"
-        return shown
-    return {k: _clip_step_text(args.get(k), max_chars=80) for k in list(args.keys())[:3]}
+    if not lines:
+        display = str(dai.get("display_text") or "").strip()
+        return display[:800] if display else ""
+    return "\n".join(lines).strip()
 
 
-def _build_plan_block(plan: list[Any]) -> str:
-    lines = [f"計畫步驟數：{len(plan)}"]
-    for i, st in enumerate(plan, 1):
-        args = getattr(st, "args", None) or {}
-        shown = _display_step_args(getattr(st, "skill", ""), args)
-        lines.append(f"  {i}. {st.skill} {shown}")
-    return "\n".join(lines)
-
-
-def _build_memory_assistant_text(answer: str, results: list[Any]) -> str:
-    # 記憶只保留自然語言回答與 DAI 摘要，避免把 plan / context_pack 汙染回下一輪 prompt。
+def _build_user_facing_reply(answer: str, results: list[Any]) -> str:
     base = (answer or "").strip()
-    dai_block = _build_dai_result_block(results)
-    if base and dai_block:
-        return f"{base}\n\n{dai_block}"
-    return base or dai_block
+    dai = _user_facing_dai_block(results)
+    if base and dai:
+        return f"{base}\n\n{dai}"
+    return base or dai or "已完成。"
 
 
 def _load_auto_jobs(problem_id: str) -> list[dict[str, Any]]:
-    """從 test_reports 載入可在桌面 CAI 跑的真實 Ollama 對話輪次。"""
     import json
 
     path = _ROOT / "test_reports" / problem_id / "scenarios.json"
@@ -164,26 +164,146 @@ def _write_auto_dialogue(problem_id: str, rows: list[dict[str, Any]]) -> Path:
     lines = [
         f"# 測試對話：{problem_id}（桌面 CAI）",
         "",
-        "| 項目 | 內容 |",
-        "|------|------|",
-        f"| 日期 | {now.strftime('%Y-%m-%d %H:%M')} (UTC+8) |",
-        "| 測試者 | **Cursor**（`desktop_cai_app.py --auto-problem`） |",
-        "| 環境 | 桌面 CAI + 真實 Ollama Planner/Replan + SessionMemory |",
-        f"| 對應回報 | [`test_reports/{problem_id}/`](../../test_reports/{problem_id}/) |",
-        f"| 本輪判定 | {len(rows)} 輪已執行 |",
+        f"| 日期 | {now.strftime('%Y-%m-%d %H:%M')} |",
+        f"| 輪次 | {len(rows)} |",
         "",
-        "## 對話（視窗內即時展示）",
-        "",
-        "| # | 情境 | 測試者輸入 | task_type | 計畫步驟 | pending_review | 回覆摘要 |",
-        "|---|------|-----------|-----------|----------|----------------|----------|",
+        "| # | 情境 | 輸入 | 回覆摘要 |",
+        "|---|------|------|----------|",
     ]
     for i, row in enumerate(rows, 1):
         lines.append(
-            f"| {i} | `{row['scenario_id']}` / {row['ref']} | {row['user']} | {row['task_type']} | "
-            f"{row['plan']} | {row['pending_review']} | {row['answer']} |"
+            f"| {i} | `{row['scenario_id']}` / {row['ref']} | {row['user']} | {row['answer']} |"
         )
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return out_path
+
+
+def _default_persona() -> dict[str, str]:
+    # relation_type／channel 由前置推斷；設定只留使用者側欄位
+    return {
+        "age_band": "25-39",
+        "occupation": "other",
+        "primary_apps": "SMS",
+        "invest_exp": "",
+    }
+
+
+def _persona_dict_from_state(state: dict[str, str]) -> dict[str, Any]:
+    apps = [a.strip() for a in str(state.get("primary_apps") or "").split(",") if a.strip()]
+    if not apps:
+        apps = ["SMS"]
+    out: dict[str, Any] = {
+        "age_band": state.get("age_band") or "25-39",
+        "occupation": state.get("occupation") or "other",
+        "primary_apps": apps,
+    }
+    inv = str(state.get("invest_exp") or "").strip()
+    if inv:
+        out["invest_exp"] = inv
+    return out
+
+
+def _open_settings_dialog(parent: tk.Misc, persona_state: dict[str, str]) -> None:
+    win = tk.Toplevel(parent)
+    win.title("個人設定")
+    win.configure(bg=_UI["bg"])
+    win.transient(parent)
+    win.grab_set()
+    win.geometry("440x360")
+    win.resizable(False, False)
+
+    pad = tk.Frame(win, bg=_UI["bg"], padx=20, pady=16)
+    pad.pack(fill=tk.BOTH, expand=True)
+
+    tk.Label(
+        pad,
+        text="個人設定",
+        bg=_UI["bg"],
+        fg=_UI["text"],
+        font=("Segoe UI Semibold", 14),
+    ).pack(anchor=tk.W)
+    tk.Label(
+        pad,
+        text="常用 App 代表你平常使用的管道。這則訊息從哪裡來、來訊者關係由系統自動判斷。",
+        bg=_UI["bg"],
+        fg=_UI["muted"],
+        font=("Segoe UI", 9),
+        wraplength=390,
+        justify=tk.LEFT,
+    ).pack(anchor=tk.W, pady=(4, 14))
+
+    form = tk.Frame(pad, bg=_UI["surface"], highlightbackground=_UI["border"], highlightthickness=1)
+    form.pack(fill=tk.BOTH, expand=True)
+    form_inner = tk.Frame(form, bg=_UI["surface"], padx=14, pady=12)
+    form_inner.pack(fill=tk.BOTH, expand=True)
+
+    age_var = tk.StringVar(value=persona_state.get("age_band", "25-39"))
+    occ_var = tk.StringVar(value=persona_state.get("occupation", "other"))
+    apps_var = tk.StringVar(value=persona_state.get("primary_apps", "SMS"))
+    invest_var = tk.StringVar(value=persona_state.get("invest_exp", ""))
+
+    def field(row: int, label: str, widget: tk.Widget) -> None:
+        tk.Label(form_inner, text=label, bg=_UI["surface"], fg=_UI["text"], width=10, anchor=tk.W).grid(
+            row=row, column=0, sticky=tk.W, pady=5
+        )
+        widget.grid(row=row, column=1, sticky=tk.EW, pady=5)
+        form_inner.columnconfigure(1, weight=1)
+
+    field(
+        0,
+        "年齡",
+        ttk.Combobox(form_inner, textvariable=age_var, values=["<25", "25-39", "40-59", "60+"], state="readonly"),
+    )
+    field(
+        1,
+        "職業",
+        ttk.Combobox(
+            form_inner,
+            textvariable=occ_var,
+            values=["student", "office", "freelance", "retired", "other"],
+            state="readonly",
+        ),
+    )
+    field(2, "常用 App", ttk.Entry(form_inner, textvariable=apps_var))
+    field(3, "投資經驗", ttk.Entry(form_inner, textvariable=invest_var))
+
+    def save() -> None:
+        persona_state["age_band"] = age_var.get()
+        persona_state["occupation"] = occ_var.get()
+        persona_state["primary_apps"] = apps_var.get()
+        persona_state["invest_exp"] = invest_var.get()
+        persona_state.pop("relation_type", None)
+        persona_state.pop("channel", None)
+        try:
+            from dual_agent.cai.profile_store import upsert_fields
+
+            upsert_fields(
+                {
+                    "age_band": persona_state["age_band"],
+                    "occupation": persona_state["occupation"],
+                    "primary_apps": persona_state["primary_apps"],
+                    "invest_exp": persona_state["invest_exp"],
+                }
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        win.destroy()
+
+    bar = tk.Frame(pad, bg=_UI["bg"])
+    bar.pack(fill=tk.X, pady=(14, 0))
+    tk.Button(bar, text="取消", command=win.destroy, padx=12, pady=4).pack(side=tk.RIGHT)
+    tk.Button(
+        bar,
+        text="儲存",
+        command=save,
+        bg=_UI["accent"],
+        fg="#FFFFFF",
+        activebackground=_UI["accent_hover"],
+        activeforeground="#FFFFFF",
+        relief=tk.FLAT,
+        padx=16,
+        pady=4,
+    ).pack(side=tk.RIGHT, padx=(0, 8))
 
 
 def main() -> None:
@@ -192,14 +312,17 @@ def main() -> None:
     from dual_agent.config import OLLAMA_BASE_URL, OLLAMA_MODEL
     from dual_agent.logutil import get_logger, setup_logging
     from dual_agent.cai.plan_execute import run_plan_and_execute
+    from dual_agent.cai.context_layer import (
+        SessionMemory,
+        build_plan_summary,
+        build_context_pack_for_turn,
+        record_turn,
+    )
+    from dual_agent.cai.executor import format_results_for_display
     from dual_agent.skill_types import SkillContext
 
-    parser = argparse.ArgumentParser(description="Dual-agent 桌面 CAI")
-    parser.add_argument(
-        "--auto-problem",
-        default=None,
-        help="自動在視窗內跑 test_reports 劇本（plan_execute + memory multiturn）",
-    )
+    parser = argparse.ArgumentParser(description="ScamSentinel 桌面")
+    parser.add_argument("--auto-problem", default=None)
     args = parser.parse_args()
     auto_jobs = _load_auto_jobs(args.auto_problem) if args.auto_problem else []
 
@@ -207,41 +330,141 @@ def main() -> None:
     log = get_logger("desktop_cai")
 
     root = tk.Tk()
-    root.title("Dual-agent · CAI（里程碑一 · 內建 Plan & Execute）")
-    root.geometry("820x560")
+    root.title("ScamSentinel")
+    root.geometry("820x700")
+    root.minsize(640, 560)
+    root.configure(bg=_UI["bg"])
 
-    frm = ttk.Frame(root, padding=8)
-    frm.pack(fill=tk.BOTH, expand=True)
+    # grid：聊天可伸縮，輸入列固定底部（避免對話框被擠掉）
+    root.columnconfigure(0, weight=1)
+    root.rowconfigure(0, weight=1)
 
-    ttk.Label(
-        frm,
-        text="模型 / Ollama（OLLAMA_MODEL、OLLAMA_BASE_URL）",
-    ).pack(anchor=tk.W)
-    status_var = tk.StringVar(value=f"Ollama: {OLLAMA_BASE_URL}　模型: {OLLAMA_MODEL}")
+    shell = tk.Frame(root, bg=_UI["bg"])
+    shell.grid(row=0, column=0, sticky="nsew", padx=16, pady=12)
+    shell.columnconfigure(0, weight=1)
+    shell.rowconfigure(1, weight=1)  # chat
+    # row 0 = top, row 1 = chat, row 2 = status, row 3 = composer
+
+    ui_font = tkfont.Font(family="Segoe UI", size=11)
+    title_font = tkfont.Font(family="Segoe UI Semibold", size=13)
+    small_font = tkfont.Font(family="Segoe UI", size=9)
+
+    # —— 頂列 ——
+    top = tk.Frame(shell, bg=_UI["bg"])
+    top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    tk.Label(top, text="ScamSentinel", bg=_UI["bg"], fg=_UI["text"], font=title_font).pack(side=tk.LEFT)
+    top_btns = tk.Frame(top, bg=_UI["bg"])
+    top_btns.pack(side=tk.RIGHT)
+    new_chat_btn = tk.Button(top_btns, text="新對話", relief=tk.GROOVE, padx=10, pady=3)
+    new_chat_btn.pack(side=tk.LEFT, padx=(0, 6))
+    settings_btn = tk.Button(top_btns, text="設定", relief=tk.GROOVE, padx=10, pady=3)
+    settings_btn.pack(side=tk.LEFT)
+
+    # —— 對話區 ——
+    chat_frame = tk.Frame(shell, bg=_UI["border"], bd=0)
+    chat_frame.grid(row=1, column=0, sticky="nsew")
+    chat_frame.columnconfigure(0, weight=1)
+    chat_frame.rowconfigure(0, weight=1)
+
+    chat = tk.Text(
+        chat_frame,
+        wrap=tk.WORD,
+        state=tk.DISABLED,
+        font=ui_font,
+        bg=_UI["surface"],
+        fg=_UI["text"],
+        relief=tk.FLAT,
+        padx=16,
+        pady=14,
+        spacing3=6,
+        highlightthickness=0,
+        borderwidth=0,
+        cursor="arrow",
+    )
+    chat_scroll = ttk.Scrollbar(chat_frame, command=chat.yview)
+    chat.configure(yscrollcommand=chat_scroll.set)
+    chat.grid(row=0, column=0, sticky="nsew", padx=1, pady=1)
+    chat_scroll.grid(row=0, column=1, sticky="ns", pady=1)
+
+    chat.tag_configure("role_user", foreground=_UI["accent"], font=("Segoe UI Semibold", 10))
+    chat.tag_configure("role_assistant", foreground=_UI["text"], font=("Segoe UI Semibold", 10))
+    chat.tag_configure("role_system", foreground=_UI["muted"], font=("Segoe UI Semibold", 10))
+    chat.tag_configure("body", foreground=_UI["text"], lmargin1=4, lmargin2=4)
+    chat.tag_configure("body_user", background=_UI["user_bg"], lmargin1=4, lmargin2=4, rmargin=40)
+    chat.tag_configure("body_system", foreground=_UI["muted"])
+
+    # —— 狀態列 ——
     busy_var = tk.StringVar(value="")
-    ttk.Label(frm, textvariable=status_var, foreground="#333").pack(anchor=tk.W)
-    ttk.Label(frm, textvariable=busy_var, foreground="#a50").pack(anchor=tk.W)
+    status = tk.Label(shell, textvariable=busy_var, bg=_UI["bg"], fg=_UI["busy"], font=small_font, anchor=tk.W)
+    status.grid(row=2, column=0, sticky="ew", pady=(6, 4))
 
-    chat = scrolledtext.ScrolledText(frm, height=22, wrap=tk.WORD, state=tk.DISABLED)
-    chat.pack(fill=tk.BOTH, expand=True, pady=(6, 6))
+    # —— 固定高度輸入列（一定看得到）——
+    composer_outer = tk.Frame(shell, bg=_UI["border"], height=110)
+    composer_outer.grid(row=3, column=0, sticky="ew")
+    composer_outer.grid_propagate(False)
+    composer_outer.columnconfigure(0, weight=1)
+    composer_outer.rowconfigure(0, weight=1)
 
-    input_frm = ttk.Frame(frm)
-    input_frm.pack(fill=tk.X)
-    entry = tk.Text(input_frm, height=3, wrap=tk.WORD)
-    entry.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
+    composer = tk.Frame(composer_outer, bg=_UI["input_bg"])
+    composer.grid(row=0, column=0, sticky="nsew", padx=1, pady=1)
+    composer.columnconfigure(0, weight=1)
+    composer.rowconfigure(0, weight=1)
 
-    btn_frm = ttk.Frame(input_frm)
-    btn_frm.pack(side=tk.RIGHT, fill=tk.Y)
-    send_btn = ttk.Button(btn_frm, text="送出")
-    send_btn.pack(fill=tk.X)
-    clear_btn = ttk.Button(btn_frm, text="清空輸入")
-    clear_btn.pack(fill=tk.X, pady=(6, 0))
-    new_chat_btn = ttk.Button(btn_frm, text="新對話")
-    new_chat_btn.pack(fill=tk.X, pady=(6, 0))
+    entry = tk.Text(
+        composer,
+        wrap=tk.WORD,
+        font=ui_font,
+        bg=_UI["input_bg"],
+        fg=_UI["placeholder"],
+        insertbackground=_UI["text"],
+        relief=tk.FLAT,
+        padx=12,
+        pady=10,
+        height=3,
+        highlightthickness=0,
+        borderwidth=0,
+    )
+    entry.grid(row=0, column=0, sticky="nsew")
+    entry.insert("1.0", _PLACEHOLDER)
+    entry._placeholder_on = True  # type: ignore[attr-defined]
 
-    from dual_agent.cai.context_layer import SessionMemory, build_plan_summary, build_context_pack_for_turn, record_turn
-    from dual_agent.cai.executor import format_results_for_display
+    send_btn = tk.Button(
+        composer,
+        text="送出",
+        bg=_UI["accent"],
+        fg="#FFFFFF",
+        activebackground=_UI["accent_hover"],
+        activeforeground="#FFFFFF",
+        relief=tk.FLAT,
+        font=("Segoe UI Semibold", 10),
+        padx=18,
+        pady=8,
+        cursor="hand2",
+    )
+    send_btn.grid(row=0, column=1, padx=(8, 10), pady=10, sticky="e")
 
+    def _clear_placeholder(_e: Any = None) -> None:
+        if getattr(entry, "_placeholder_on", False):
+            entry.delete("1.0", tk.END)
+            entry.configure(fg=_UI["text"])
+            entry._placeholder_on = False  # type: ignore[attr-defined]
+
+    def _maybe_restore_placeholder(_e: Any = None) -> None:
+        if not entry.get("1.0", tk.END).strip():
+            entry.delete("1.0", tk.END)
+            entry.configure(fg=_UI["placeholder"])
+            entry.insert("1.0", _PLACEHOLDER)
+            entry._placeholder_on = True  # type: ignore[attr-defined]
+
+    def _read_entry() -> str:
+        if getattr(entry, "_placeholder_on", False):
+            return ""
+        return entry.get("1.0", tk.END).strip()
+
+    entry.bind("<FocusIn>", _clear_placeholder)
+    entry.bind("<FocusOut>", _maybe_restore_placeholder)
+
+    persona_state = _default_persona()
     q: queue.Queue[tuple[str, str | None, dict[str, Any] | None]] = queue.Queue()
     ctx = SkillContext(user_input="")
     session = SessionMemory()
@@ -250,8 +473,12 @@ def main() -> None:
     auto_running = bool(auto_jobs)
 
     def append_chat(who: str, text: str) -> None:
+        role_key = "user" if who in ("你", "User") else ("system" if who in ("系統", "System") else "assistant")
+        label = {"user": "你", "assistant": "ScamSentinel", "system": "提示"}[role_key]
+        body_tag = "body_user" if role_key == "user" else ("body_system" if role_key == "system" else "body")
         chat.configure(state=tk.NORMAL)
-        chat.insert(tk.END, f"{who}\n{text}\n\n")
+        chat.insert(tk.END, f"{label}\n", f"role_{role_key}")
+        chat.insert(tk.END, f"{text}\n\n", body_tag)
         chat.see(tk.END)
         chat.configure(state=tk.DISABLED)
 
@@ -260,9 +487,18 @@ def main() -> None:
         ctx = SkillContext(user_input="")
         session = SessionMemory()
 
+    def set_sending(busy: bool) -> None:
+        send_btn.configure(state=tk.DISABLED if busy else tk.NORMAL)
+        entry.configure(state=tk.DISABLED if busy else tk.NORMAL)
+        if busy:
+            busy_var.set("正在回覆…")
+        else:
+            busy_var.set("")
+
     def worker(user_message: str, job: dict[str, Any] | None = None) -> None:
         meta: dict[str, Any] | None = None
         try:
+            ctx.policy_state["dai_persona"] = _persona_dict_from_state(persona_state)
             cp = build_context_pack_for_turn(
                 session,
                 user_message,
@@ -270,15 +506,13 @@ def main() -> None:
                 pending_memory_confirm=ctx.policy_state.get("pending_memory_confirm"),
             )
             out = run_plan_and_execute(user_text=user_message, ctx=ctx, context_pack=cp)
-            plan_block = _build_plan_block(out.plan)
             result_summary = (
-                format_results_for_display(out.results) if out.results else "（本輪無 Executor 結果）"
+                format_results_for_display(out.results) if out.results else ""
             )
-            memory_answer = _build_memory_assistant_text(out.answer, out.results)
-            answer_text = f"{plan_block}\n\n{memory_answer}" if memory_answer else plan_block
-            plan_detail = " → ".join(
-                f"{s.skill} {dict(s.args or {})}" for s in out.plan
-            ) or "（空）"
+            # 正式介面：只給使用者自然回覆 + DAI 摘要
+            face = _build_user_facing_reply(out.answer, out.results)
+            memory_answer = face
+            plan_detail = " → ".join(f"{s.skill}" for s in out.plan) or ""
             meta = {
                 "scenario_id": (job or {}).get("scenario_id", "manual"),
                 "ref": (job or {}).get("ref", "手動"),
@@ -286,9 +520,9 @@ def main() -> None:
                 "task_type": out.task_type,
                 "plan": plan_detail,
                 "pending_review": bool(ctx.policy_state.get("pending_review")),
-                "answer": (memory_answer or answer_text)[:200],
+                "answer": face[:200],
             }
-            q.put(("assistant", answer_text, meta))
+            q.put(("assistant", face, meta))
             record_turn(
                 session,
                 user=user_message,
@@ -302,7 +536,9 @@ def main() -> None:
             )
         except Exception as e:  # noqa: BLE001
             log.exception("run_plan_and_execute 失敗")
-            q.put(("assistant", f"（錯誤）{e}", meta))
+            q.put(("assistant", "抱歉，處理時發生問題，請稍後再試。", meta))
+            # 細節只寫 log，不上畫面
+            log.error("desktop error: %s", e)
 
     def start_auto_turn() -> None:
         nonlocal auto_index, auto_running
@@ -310,33 +546,32 @@ def main() -> None:
             auto_running = False
             reset_session()
             out_path = _write_auto_dialogue(args.auto_problem or "", auto_rows)
-            busy_var.set("")
-            send_btn.configure(state=tk.NORMAL)
-            append_chat(
-                "系統",
-                f"劇本執行完畢（共 {len(auto_rows)} 輪）。測試脈絡已清空，可開始手動對話。\n紀錄已寫入：\n{out_path}",
-            )
+            set_sending(False)
+            append_chat("系統", f"自動測試完成（{len(auto_rows)} 輪）。")
+            log.info("auto dialogue written: %s", out_path)
             return
         job = auto_jobs[auto_index]
         if job.get("fresh_session"):
             reset_session()
         user_text = str(job["user"])
         append_chat("你", user_text)
-        busy_var.set(f"自動劇本 {auto_index + 1}/{len(auto_jobs)}：思考與執行中…")
-        send_btn.configure(state=tk.DISABLED)
+        set_sending(True)
+        busy_var.set(f"自動測試 {auto_index + 1}/{len(auto_jobs)}…")
         threading.Thread(target=worker, args=(user_text, job), daemon=True).start()
 
-    def on_send() -> None:
+    def on_send(_e: Any = None) -> str | None:
         if auto_running:
-            return
-        raw = entry.get("1.0", tk.END).strip()
+            return "break"
+        raw = _read_entry()
         if not raw:
-            return
+            return "break"
         append_chat("你", raw)
         entry.delete("1.0", tk.END)
-        send_btn.configure(state=tk.DISABLED)
-        busy_var.set("思考與執行中…")
+        entry._placeholder_on = False  # type: ignore[attr-defined]
+        entry.configure(fg=_UI["text"])
+        set_sending(True)
         threading.Thread(target=worker, args=(raw, None), daemon=True).start()
+        return "break"
 
     def poll_queue() -> None:
         nonlocal auto_index, auto_running
@@ -344,7 +579,6 @@ def main() -> None:
             while True:
                 role, text, meta = q.get_nowait()
                 if role == "assistant":
-                    busy_var.set("")
                     append_chat("助理", text or "")
                     if meta:
                         auto_rows.append(meta)
@@ -352,42 +586,44 @@ def main() -> None:
                         auto_index += 1
                         root.after(600, start_auto_turn)
                     else:
-                        send_btn.configure(state=tk.NORMAL)
+                        set_sending(False)
+                        _maybe_restore_placeholder()
+                        entry.focus_set()
         except queue.Empty:
             pass
         root.after(120, poll_queue)
-
-    def on_clear() -> None:
-        entry.delete("1.0", tk.END)
 
     def on_new_chat() -> None:
         if auto_running:
             return
         reset_session()
-        append_chat("系統", "已開始新對話（記憶與待審狀態已清空）。")
+        chat.configure(state=tk.NORMAL)
+        chat.delete("1.0", tk.END)
+        chat.configure(state=tk.DISABLED)
+        append_chat("系統", "已開始新對話。直接輸入或貼上簡訊即可。")
+        entry.focus_set()
+        _clear_placeholder()
 
     send_btn.configure(command=on_send)
-    clear_btn.configure(command=on_clear)
     new_chat_btn.configure(command=on_new_chat)
-    entry.bind("<Control-Return>", lambda _e: on_send())
+    settings_btn.configure(command=lambda: _open_settings_dialog(root, persona_state))
+    entry.bind("<Control-Return>", on_send)
 
-    intro = (
-        "【CAI】Planner →（Todo 非空則）Executor 執行第一項 → Replan 迴圈。\n"
-        "【Memory】已啟用 Context Pack：長期摘要 + 最近 10 輪緩衝 + 任務狀態（緩衝溢出會壓縮進摘要，需 Ollama）。\n\n"
-    )
     if auto_jobs:
-        intro += (
-            f"【自動劇本】`{args.auto_problem}`：共 {len(auto_jobs)} 輪（CAI multiturn + Memory）。\n"
-            "Ingress / Router / Validate 單元段請見 mock 審計紀錄。\n"
-            "即將自動開始…\n"
-        )
-        send_btn.configure(state=tk.DISABLED)
+        append_chat("系統", "正在執行自動測試…")
+        set_sending(True)
     else:
-        intro += "輸入問題或 (skill:…) 指令。\n（Ctrl+Enter 送出）"
-    append_chat("系統", intro)
+        append_chat(
+            "系統",
+            "你好，我是 ScamSentinel。\n"
+            "貼上可疑簡訊，或直接問我問題。\n"
+            "右上角「設定」可調整個人情境（可選）。",
+        )
+        root.after(200, entry.focus_set)
+
     poll_queue()
     if auto_jobs:
-        root.after(1200, start_auto_turn)
+        root.after(800, start_auto_turn)
     root.mainloop()
 
 

@@ -25,6 +25,9 @@ class DAIRequest:
     sender_tech_context: dict[str, Any] = field(default_factory=dict)
     source: str = ""
     """UEBA 來源標籤（如 sms_share、desktop）。"""
+    persona: dict[str, Any] = field(default_factory=dict)
+    """雙路建圖：使用者側 age_band／occupation／primary_apps／invest_exp；
+    channel／relation_type 由前置推斷寫入。"""
 
 
 @dataclass

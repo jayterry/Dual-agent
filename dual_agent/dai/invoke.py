@@ -32,13 +32,14 @@ def _invoke_dai_sms_review(
         from dual_agent.dai.executor import build_pipeline_context, run_sms_review_dag
 
         if pipeline_ctx is not None:
-            advance_pipeline_node(pipeline_ctx, "dai_defense_llm", model=m)
+            advance_pipeline_node(pipeline_ctx, "dai_plan", model=m)
         plan = invoke_defense_review_sms_plan(
             req, model=m, base_url=u, temperature=temperature
         )
         pipe = build_pipeline_context(
             req, model=m, base_url=u, temperature=temperature, source=src
         )
+        pipe.ui_pipeline_ctx = pipeline_ctx
         report, observations = run_sms_review_dag(pipe, pipeline_ctx=pipeline_ctx)
         if not report:
             return DAIResult(

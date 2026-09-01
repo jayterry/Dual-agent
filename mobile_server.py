@@ -1,5 +1,5 @@
 """
-手機（USB + adb reverse）Dual-agent API。
+手機（USB + adb reverse）ScamSentinel API。
 
   cd Dual-agent
   uvicorn mobile_server:app --host 127.0.0.1 --port 8787
@@ -39,6 +39,7 @@ from dual_agent.cai.pipeline_progress import (
     set_pipeline_stage,
 )
 from dual_agent.cai.plan_execute import compose_review_user_text, run_dai_then_replan, run_plan_and_execute
+from dual_agent.cai.profile_store import load_persona_into_ctx, to_dai_persona, upsert_fields
 from dual_agent.config import OLLAMA_BASE_URL, OLLAMA_MODEL, cai_memory_model
 from dual_agent.dai.user_db import (
     list_trusted_domains,
@@ -49,9 +50,10 @@ from dual_agent.dai.user_db import (
 )
 from dual_agent.skill_types import SkillContext
 
-app = FastAPI(title="Dual-agent Mobile API", version="0.3.0")
+app = FastAPI(title="ScamSentinel Mobile API", version="0.4.0")
 
 _SESSION_TTL_SEC = max(60, int(os.environ.get("MOBILE_SESSION_TTL_SEC", "7200")))
+_DEFAULT_MOBILE_USER = "mobile"
 
 
 def _ollama_unavailable_message(exc: BaseException) -> str | None:
@@ -107,6 +109,21 @@ _SESSIONS: dict[str, _SessionEntry] = {}
 class UserProfileBody(BaseModel):
     user_id: Optional[str] = None
     display_name: Optional[str] = None
+    age_band: Optional[str] = None
+    occupation: Optional[str] = None
+    primary_apps: Optional[Any] = None
+    invest_exp: Optional[str] = None
+
+
+class ProfileBody(BaseModel):
+    """GET/PUT /v1/profile 用（建圖四欄＋顯示名）。"""
+
+    user_id: Optional[str] = None
+    display_name: Optional[str] = None
+    age_band: Optional[str] = None
+    occupation: Optional[str] = None
+    primary_apps: Optional[Any] = None
+    invest_exp: Optional[str] = None
 
 
 def _require_token(authorization: Optional[str] = Header(default=None)) -> None:
@@ -138,6 +155,27 @@ def _get_session(session_id: str) -> _SessionEntry:
     return ent
 
 
+def _resolve_uid(raw: str | None) -> str:
+    uid = (raw or "").strip()
+    return uid or _DEFAULT_MOBILE_USER
+
+
+def _persona_fields_from_profile(profile: UserProfileBody | ProfileBody | None) -> dict[str, Any]:
+    if profile is None:
+        return {}
+    out: dict[str, Any] = {}
+    if getattr(profile, "age_band", None) not in (None, ""):
+        out["age_band"] = str(profile.age_band).strip()
+    if getattr(profile, "occupation", None) not in (None, ""):
+        out["occupation"] = str(profile.occupation).strip()
+    apps = getattr(profile, "primary_apps", None)
+    if apps not in (None, ""):
+        out["primary_apps"] = apps
+    if getattr(profile, "invest_exp", None) is not None:
+        out["invest_exp"] = str(profile.invest_exp or "").strip()
+    return out
+
+
 def _profile_to_dict(profile: UserProfileBody | None) -> dict[str, Any] | None:
     if profile is None:
         return None
@@ -149,11 +187,27 @@ def _profile_to_dict(profile: UserProfileBody | None) -> dict[str, Any] | None:
     return out or None
 
 
+def _apply_persona_to_session(ent: _SessionEntry, profile: UserProfileBody | None) -> str:
+    """寫入 profile_user_id、可選 upsert 四欄，並 load_persona_into_ctx。"""
+    uid = _resolve_uid(profile.user_id if profile else None)
+    # session 若已綁定過其他 user_id，以本輪為準
+    prev = str(ent.ctx.policy_state.get("profile_user_id") or "").strip()
+    if prev and not (profile and profile.user_id):
+        uid = prev
+    ent.ctx.policy_state["profile_user_id"] = uid
+    fields = _persona_fields_from_profile(profile)
+    if fields:
+        upsert_fields(fields, user_id=uid)
+    load_persona_into_ctx(ent.ctx, user_id=uid)
+    return uid
+
+
 def _prepare_context(ent: _SessionEntry, profile: UserProfileBody | None, user_text: str) -> str:
     """merge user_profile、依本輪 retrieve 組 context_pack，並同步至 SkillContext.policy_state。"""
     pd = _profile_to_dict(profile)
     if pd:
         merge_user_profile(ent.memory, pd)
+    _apply_persona_to_session(ent, profile)
     uf = normalize_user_facts(ent.ctx.policy_state.get("user_facts") or ent.memory.user_facts)
     cp = build_context_pack_for_turn(
         ent.memory,
@@ -166,6 +220,27 @@ def _prepare_context(ent: _SessionEntry, profile: UserProfileBody | None, user_t
     ent.ctx.policy_state["user_facts"] = normalize_user_facts(ent.memory.user_facts)
     ent.ctx.policy_state["task_snapshot"] = dict(ent.memory.task_snapshot or {})
     return cp
+
+
+def _profile_response(user_id: str, display_name: str | None = None) -> dict[str, Any]:
+    persona = to_dai_persona(user_id)
+    apps = persona.get("primary_apps") or ["SMS"]
+    if isinstance(apps, list):
+        apps_out: Any = apps
+        apps_str = ",".join(str(a) for a in apps)
+    else:
+        apps_out = apps
+        apps_str = str(apps)
+    return {
+        "user_id": user_id,
+        "display_name": display_name or "",
+        "age_band": persona.get("age_band") or "25-39",
+        "occupation": persona.get("occupation") or "other",
+        "primary_apps": apps_out,
+        "primary_apps_text": apps_str,
+        "invest_exp": persona.get("invest_exp") or "",
+        "dai_persona": persona,
+    }
 
 
 def _sync_user_facts_from_ctx(ent: _SessionEntry) -> None:
@@ -316,6 +391,34 @@ class DomainBody(BaseModel):
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/v1/profile")
+def get_user_profile(
+    user_id: Optional[str] = None,
+    _: None = Depends(_require_token),
+) -> dict[str, Any]:
+    uid = _resolve_uid(user_id)
+    return _profile_response(uid)
+
+
+@app.put("/v1/profile")
+def put_user_profile(body: ProfileBody, _: None = Depends(_require_token)) -> dict[str, Any]:
+    uid = _resolve_uid(body.user_id)
+    fields = _persona_fields_from_profile(body)
+    if fields:
+        upsert_fields(fields, user_id=uid)
+    elif not any(
+        [
+            body.age_band,
+            body.occupation,
+            body.primary_apps,
+            body.invest_exp is not None,
+        ]
+    ):
+        # 無四欄時仍回傳目前值（僅確認 user 存在）
+        pass
+    return _profile_response(uid, display_name=(body.display_name or "").strip())
 
 
 @app.get("/v1/session/{session_id}/pipeline")

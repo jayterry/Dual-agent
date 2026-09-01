@@ -18,7 +18,8 @@ def test_cai_catalog_excludes_dai_pipeline_skills() -> None:
 
 def test_dai_catalog_has_pipeline_skills() -> None:
     dai_names = {x["name"] for x in get_tool_catalog_dai()}
-    assert "fuse_risk_and_ueba" in dai_names
+    assert "dual_path_analyze" in dai_names
+    assert "fuse_risk_and_ueba" in dai_names  # legacy skill 仍可載入
     assert "build_analysis_payload" in dai_names
     assert "call_dai" not in dai_names
 

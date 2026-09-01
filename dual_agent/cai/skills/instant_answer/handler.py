@@ -7,7 +7,7 @@ from typing import Any
 
 from dual_agent.skill_types import SkillContext, SkillResult
 
-_USER_AGENT = "curl/8.4.0 (compatible; Dual-agent/instant_answer)"
+_USER_AGENT = "curl/8.4.0 (compatible; ScamSentinel/instant_answer)"
 
 ARGS_SCHEMA: dict[str, Any] = {
     "type": "object",

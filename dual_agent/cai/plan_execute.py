@@ -319,6 +319,18 @@ def _outcome_from_direct_answer(
     )
 
 
+def _ingress_is_review_scope(ingress: IngressPayload, ctx: SkillContext) -> bool:
+    """是否屬審查流程（應設 pending_review 並追問待審正文）。"""
+    itt = str(ingress.detected_task_type or "").strip().lower()
+    if itt == "check":
+        return True
+    if ingress.requires_dai:
+        return True
+    if ctx.policy_state.get("pending_review"):
+        return True
+    return False
+
+
 def _handle_call_dai_meta_only_failure(
     r: SkillResult,
     ctx: SkillContext,
@@ -329,6 +341,8 @@ def _handle_call_dai_meta_only_failure(
     results: list[SkillResult],
 ) -> PlanExecuteOutcome | None:
     if r.skill != "call_dai" or r.ok or r.error != "artifact_meta_only":
+        return None
+    if not _ingress_is_review_scope(ingress, ctx):
         return None
     _set_pending_review(ctx, ingress)
     ctx.policy_state["pending_task"] = {
@@ -706,6 +720,12 @@ def run_dai_then_replan(
 
     set_pipeline_stage(ctx, flow="review", stage="dai", model=model)
     _clear_pending_review(ctx)
+    try:
+        from dual_agent.cai.profile_store import load_persona_into_ctx, resolve_profile_user_id
+
+        load_persona_into_ctx(ctx, user_id=resolve_profile_user_id(ctx))
+    except Exception:  # noqa: BLE001
+        pass
     normalized_turn = _planner_source_turn_text(user_text, ingress)
     initial_plan, task_type, task_state = _direct_review_call_dai_plan(ingress, context_pack)
     po_message = "（送審：DAI call_dai 後由 Replan 總結；未經 Planner）"
@@ -782,6 +802,14 @@ def run_plan_and_execute(
     snap = _task_snapshot_from_ctx(ctx) or {}
     normalized_turn = _planner_source_turn_text(user_text, ingress)
 
+    # 載入本機 profile（四欄＋known_relations）供 DAI 建圖／推斷
+    try:
+        from dual_agent.cai.profile_store import load_persona_into_ctx, resolve_profile_user_id
+
+        load_persona_into_ctx(ctx, user_id=resolve_profile_user_id(ctx))
+    except Exception:  # noqa: BLE001
+        pass
+
     if had_pending_review and should_abandon_pending_review(
         normalized_turn,
         ingress_artifact_text=(ingress.artifact_text or "").strip(),
@@ -793,22 +821,38 @@ def run_plan_and_execute(
     if _should_direct_review_ask_user(ingress):
         return _direct_review_ask_user(ctx, ingress)
 
-    set_pipeline_stage(ctx, flow="chat", stage="memory", model=cai_memory_model())
-    user_facts = normalize_user_facts(
-        ctx.policy_state.get("user_facts") if isinstance(ctx.policy_state.get("user_facts"), dict) else None
+    # Memory：僅在非防詐路徑，或已有待確認記名時執行（避免劫持送審）
+    pending_mem = ctx.policy_state.get("pending_memory_confirm")
+    has_pending_mem = isinstance(pending_mem, dict) and bool(pending_mem.get("value"))
+    itt = str(getattr(ingress, "detected_task_type", "") or "").strip().lower()
+    fraud_or_review = bool(ingress.requires_dai) or itt in ("check",)
+    # 額外：轉述可疑投資／匯款／房產等 → 不當記憶
+    fraud_narrative = any(
+        tok in normalized_turn
+        for tok in ("房產", "匯款", "轉帳", "驗證碼", "點擊連結", "投資", "詐騙", "準備好")
+    ) and any(tok in normalized_turn for tok in ("發訊息", "傳訊息", "簡訊", "跟我說", "叫我"))
+
+    allow_memory = has_pending_mem or (
+        not fraud_or_review and not fraud_narrative
     )
-    mem_out = try_handle_memory_turn(
-        normalized_turn,
-        ctx=ctx,
-        user_facts=user_facts,
-        model=cai_memory_model(),
-        base_url=base_url,
-        temperature=0.0,
-        context_pack=context_pack,
-    )
-    if mem_out is not None:
-        _clear_pending_review(ctx)
-        return mem_out
+    if allow_memory:
+        set_pipeline_stage(ctx, flow="chat", stage="memory", model=cai_memory_model())
+        user_facts = normalize_user_facts(
+            ctx.policy_state.get("user_facts") if isinstance(ctx.policy_state.get("user_facts"), dict) else None
+        )
+        mem_out = try_handle_memory_turn(
+            normalized_turn,
+            ctx=ctx,
+            user_facts=user_facts,
+            model=cai_memory_model(),
+            base_url=base_url,
+            temperature=0.0,
+            context_pack=context_pack,
+        )
+        if mem_out is not None:
+            return mem_out
+    else:
+        set_pipeline_stage(ctx, flow="chat", stage="memory_skipped")
 
     if is_pure_identity_turn(normalized_turn):
         direct = _try_direct_follow_up_answer(normalized_turn, ctx, context_pack=context_pack)

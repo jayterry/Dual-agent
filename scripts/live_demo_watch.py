@@ -30,7 +30,7 @@ def main() -> int:
     out_path = out_dir / f"{now.strftime('%Y-%m-%d_即時Ollama示範')}.md"
 
     lines = [
-        "# 即時示範：測試者 ↔ Dual-agent（Ollama）",
+        "# 即時示範：測試者 ↔ ScamSentinel（Ollama）",
         "",
         f"| 時間 | {now.strftime('%Y-%m-%d %H:%M')} (UTC+8) |",
         "| 環境 | 真實 Ollama Planner/Replan |",
@@ -45,14 +45,14 @@ def main() -> int:
     for i, user in enumerate(turns, 1):
         print(f"\n>>> 第 {i} 輪", flush=True)
         print(f"【測試者】 {user}", flush=True)
-        print("（Dual-agent 思考中…）", flush=True)
+        print("（ScamSentinel 思考中…）", flush=True)
         out = run_plan_and_execute(user_text=user, ctx=ctx)
         plan = " → ".join(f"{s.skill} {dict(s.args or {})}" for s in out.plan) or "（空）"
         pr = bool(ctx.policy_state.get("pending_review"))
         ans = (out.answer or "").replace("\n", " ")
         print(f"【計畫】 {plan}", flush=True)
         print(f"【狀態】 {out.task_type} / {out.task_state} | pending_review={pr}", flush=True)
-        print(f"【Dual-agent】 {ans[:500]}", flush=True)
+        print(f"【ScamSentinel】 {ans[:500]}", flush=True)
         lines.extend(
             [
                 f"## 第 {i} 輪",
@@ -63,7 +63,7 @@ def main() -> int:
                 f"- task：{out.task_type} / {out.task_state}",
                 f"- pending_review：{pr}",
                 "",
-                f"**Dual-agent**：{ans}",
+                f"**ScamSentinel**：{ans}",
                 "",
             ]
         )

@@ -9,7 +9,7 @@ from typing import Any
 from dual_agent.skill_types import SkillContext, SkillResult
 
 # wttr.in 建議帶類 curl User-Agent，避免被預設 Python UA 擋下
-_USER_AGENT = "curl/8.4.0 (compatible; Dual-agent/weather; wttr.in)"
+_USER_AGENT = "curl/8.4.0 (compatible; ScamSentinel/weather; wttr.in)"
 
 ARGS_SCHEMA: dict[str, Any] = {
     "type": "object",

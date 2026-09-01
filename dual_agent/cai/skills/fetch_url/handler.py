@@ -21,7 +21,7 @@ ARGS_SCHEMA: dict[str, Any] = {
     "required": ["url"],
 }
 
-_USER_AGENT = "Mozilla/5.0 (compatible; Dual-agent/fetch_url; +https://github.com/)"
+_USER_AGENT = "Mozilla/5.0 (compatible; ScamSentinel/fetch_url; +https://github.com/)"
 _MAX_DOWNLOAD_BYTES = 900_000
 _MAX_REDIRECTS = 6
 

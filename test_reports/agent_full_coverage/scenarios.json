@@ -479,6 +479,41 @@
           "expect": { "memory_hit": false }
         }
       ]
+    },
+    {
+      "id": "it_career_guess_no_call_dai",
+      "description": "IT 閒聊猜謎：Planner 誤排 call_dai 應被 validate 剝除，不得進入待審",
+      "type": "plan_execute_multiturn",
+      "session": "fresh",
+      "mock": {
+        "planner_responses": [
+          {
+            "task_type": "check",
+            "task_state": "running",
+            "todos": [{ "skill": "call_dai", "args": {} }],
+            "message": "需要審查這則訊息"
+          }
+        ],
+        "replan_default": {
+          "complete": true,
+          "final_answer": "我猜你可能做資安、網管或軟體開發方面的工作。",
+          "task_state": "completed"
+        }
+      },
+      "turns": [
+        {
+          "group": "baseline",
+          "ref": "IT 猜專業方向",
+          "user": "做it有很多方面，你猜是哪個方面的",
+          "expect": {
+            "forbidden_skills": ["call_dai"],
+            "forbid_review_ask_user": true,
+            "pending_review": false,
+            "task_type": "direct_response",
+            "answer_contains": ["資安"]
+          }
+        }
+      ]
     }
   ]
 }

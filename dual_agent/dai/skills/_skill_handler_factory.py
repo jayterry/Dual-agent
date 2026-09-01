@@ -23,13 +23,13 @@ def make_dai_step_handler(step_name: str) -> Callable[[dict[str, Any], SkillCont
             )
         try:
             fn(pipe)
-            if step_name == "fuse_risk_and_ueba":
+            if step_name in ("dual_path_analyze", "fuse_risk_and_ueba"):
                 rs = int((pipe.report or {}).get("risk_score") or 0)
                 return SkillResult(
                     ok=True,
                     skill=step_name,
                     summary=f"risk_score={rs}",
-                    data={"report": pipe.report},
+                    data={"report": pipe.report, "step": step_name},
                 )
             if step_name == "score_rules":
                 return SkillResult(ok=True, skill=step_name, summary=f"r_rules={pipe.r_rules}")

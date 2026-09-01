@@ -6,7 +6,6 @@ import time
 from typing import Any, Literal
 
 from dual_agent.config import OLLAMA_MODEL, cai_memory_model
-from dual_agent.dai.pipeline_context import SMS_REVIEW_DAG
 from dual_agent.skill_types import SkillContext
 
 PipelineFlow = Literal["chat", "review"]
@@ -22,7 +21,7 @@ CHAT_STAGES: list[tuple[str, str]] = [
 ]
 
 REVIEW_STAGES: list[tuple[str, str]] = [
-    ("dai", "風險分析"),
+    ("dai", "雙路風險分析"),
     ("replan", "整理回覆"),
     ("finish", "完成"),
 ]
@@ -33,11 +32,12 @@ _STAGE_TO_NODE: dict[str, str] = {
     "planner": "planner_llm",
     "execute": "executor_skill",
     "replan": "replan_llm",
-    "dai": "dai_defense_llm",
+    "dai": "dai_plan",
     "finish": "finish",
 }
 
 _DAI_STEP_LABELS: dict[str, str] = {
+    "dual_path_analyze": "雙路風險分析",
     "build_analysis_payload": "建構分析載荷",
     "score_rules": "規則評分",
     "score_threat_intel": "威脅情資",
@@ -47,7 +47,17 @@ _DAI_STEP_LABELS: dict[str, str] = {
     "fuse_risk_and_ueba": "融合與 UEBA",
 }
 
-_DAI_LLM_STEPS: frozenset[str] = frozenset({"score_toxic", "semantic_supplement"})
+# 雙路主路徑流程圖子節點（不再顯示舊 7 步 DAG）
+_DUAL_FLOW_NODE_SPECS: list[tuple[str, NodeKind, str]] = [
+    ("dai_infer", "system", "推斷管道／關係"),
+    ("dai_path_a", "dai_step", "Path A 威脅／情境"),
+    ("dai_path_b", "dai_step", "Path B（LLM）"),
+    ("dai_narrator", "llm", "Narrator 說明"),
+]
+
+_DAI_LLM_STEPS: frozenset[str] = frozenset(
+    {"dual_path_analyze", "score_toxic", "semantic_supplement", "dai_path_b", "dai_narrator"}
+)
 
 _SKILL_LABELS: dict[str, str] = {
     "call_dai": "風險分析",
@@ -90,34 +100,27 @@ def _chat_base_nodes() -> list[dict[str, str]]:
     ]
 
 
+def _dual_flow_nodes() -> list[dict[str, str]]:
+    return [
+        _new_node(node_id=nid, kind=kind, label_zh=label)
+        for nid, kind, label in _DUAL_FLOW_NODE_SPECS
+    ]
+
+
 def _review_base_nodes() -> list[dict[str, str]]:
     nodes = [
         _new_node(node_id="ingress", kind="system", label_zh="載入記憶與上下文"),
-        _new_node(node_id="dai_defense_llm", kind="llm", label_zh="DAI Defense"),
+        _new_node(node_id="dai_plan", kind="llm", label_zh="DAI 啟動"),
     ]
-    for step in SMS_REVIEW_DAG:
-        nodes.append(
-            _new_node(
-                node_id=f"dai_{step}",
-                kind="dai_step",
-                label_zh=_DAI_STEP_LABELS.get(step, step),
-            )
-        )
+    nodes.extend(_dual_flow_nodes())
     nodes.append(_new_node(node_id="replan_llm", kind="llm", label_zh="Replan"))
     nodes.append(_new_node(node_id="finish", kind="system", label_zh="完成"))
     return nodes
 
 
 def _dai_sub_nodes() -> list[dict[str, str]]:
-    nodes = [_new_node(node_id="dai_defense_llm", kind="llm", label_zh="DAI Defense")]
-    for step in SMS_REVIEW_DAG:
-        nodes.append(
-            _new_node(
-                node_id=f"dai_{step}",
-                kind="dai_step",
-                label_zh=_DAI_STEP_LABELS.get(step, step),
-            )
-        )
+    nodes = [_new_node(node_id="dai_plan", kind="llm", label_zh="DAI 啟動")]
+    nodes.extend(_dual_flow_nodes())
     return nodes
 
 
@@ -283,16 +286,44 @@ def set_pipeline_stage(
         default_model = ""
         if node_id == "memory_llm":
             default_model = m or cai_memory_model()
-        elif node_id in ("planner_llm", "replan_llm", "dai_defense_llm"):
+        elif node_id in ("planner_llm", "replan_llm", "dai_plan", "dai_defense_llm", "dai_narrator"):
             default_model = m or OLLAMA_MODEL
         advance_pipeline_node(ctx, node_id, model=default_model, skill=d if node_id == "executor_skill" else "")
 
 
 def advance_dai_step(ctx: SkillContext, step_name: str, *, model: str = "") -> None:
-    """DAI Executor DAG 每一步。"""
-    node_id = f"dai_{step_name}"
+    """DAI Executor 步驟：舊 DAG 對應 dai_{name}；雙路主路徑進到第一個子節點。"""
     m = (model or "").strip()
+    if step_name == "dual_path_analyze":
+        # 細節進度由 advance_dual_phase 在分析中間推進
+        advance_pipeline_node(ctx, "dai_infer", model=m)
+        return
+    node_id = f"dai_{step_name}"
     if not m and step_name in _DAI_LLM_STEPS:
+        m = OLLAMA_MODEL
+    advance_pipeline_node(ctx, node_id, model=m)
+
+
+def advance_dual_phase(
+    ctx: SkillContext | None,
+    phase: str,
+    *,
+    model: str = "",
+) -> None:
+    """雙路分析內部階段：infer / path_a / path_b / narrator。"""
+    if ctx is None:
+        return
+    mapping = {
+        "infer": "dai_infer",
+        "path_a": "dai_path_a",
+        "path_b": "dai_path_b",
+        "narrator": "dai_narrator",
+    }
+    node_id = mapping.get(phase)
+    if not node_id:
+        return
+    m = (model or "").strip()
+    if not m and node_id in ("dai_path_b", "dai_narrator"):
         m = OLLAMA_MODEL
     advance_pipeline_node(ctx, node_id, model=m)
 

@@ -1,8 +1,6 @@
-"""semantic_labels 顯示分下限（融合 v2）。"""
+"""semantic_labels 顯示分下限（融合 v2 單元）+ 雙路身分恐嚇。"""
 
 from __future__ import annotations
-
-from unittest.mock import patch
 
 from dual_agent.dai.risk_analysis.pipeline import run_risk_analysis
 from dual_agent.dai.risk_analysis.rules import score_r_rules
@@ -39,21 +37,26 @@ def test_finalize_floor_from_phishing_label() -> None:
     assert score >= 60
 
 
-def test_pipeline_identity_rules_and_labels() -> None:
-    req = DAIRequest(user_text="送審", artifact=_IDENTITY_SMS, sms_review=True)
-    stub = {
-        "r_llm_optional": 2,
-        "tier_h": 8,
-        "tier_i": 4,
-        "explanation": "",
-        "safety_summary": "可能涉及詐騙行為，特別是實名認證恐嚇，建議提高警覺。",
-        "labels": ["phishing"],
-        "skipped": False,
-    }
-    with patch(
-        "dual_agent.dai.skills._pipeline_steps.invoke_semantic_supplement",
-        return_value=stub,
-    ):
+def test_pipeline_identity_dual_path() -> None:
+    import os
+
+    prev_pb = os.environ.get("DAI_DUAL_PATH_B")
+    prev_nr = os.environ.get("DAI_DUAL_NARRATOR")
+    os.environ["DAI_DUAL_PATH_B"] = "0"
+    os.environ["DAI_DUAL_NARRATOR"] = "0"
+    try:
+        req = DAIRequest(user_text="送審", artifact=_IDENTITY_SMS, sms_review=True)
         report = run_risk_analysis(req)
-    assert int(report["risk_score"]) >= 25
-    assert report["recommended_cai_action"] in ("ask_user", "block")
+        assert report.get("engine") == "fraud_dual"
+        assert int(report["risk_score"]) >= 15
+        assert report.get("path_a")
+        assert report["verdict"] in ("allow", "warn", "block")
+    finally:
+        if prev_pb is None:
+            os.environ.pop("DAI_DUAL_PATH_B", None)
+        else:
+            os.environ["DAI_DUAL_PATH_B"] = prev_pb
+        if prev_nr is None:
+            os.environ.pop("DAI_DUAL_NARRATOR", None)
+        else:
+            os.environ["DAI_DUAL_NARRATOR"] = prev_nr

@@ -16,7 +16,11 @@ from dual_agent.cai.planner_context import (
     meta_question_about_assistant_behavior,
 )
 from dual_agent.cai.schemas import PlanStep
-from dual_agent.cai.review_entry_eligibility import should_abandon_pending_review
+from dual_agent.cai.review_entry_eligibility import (
+    has_substantive_review_signals,
+    looks_like_review_intent_without_artifact,
+    should_abandon_pending_review,
+)
 from dual_agent.cai.skills.call_dai.handler import artifact_is_meta_only_intent
 
 _REVIEW_ASK_USER_QUESTION = "請貼上完整簡訊或訊息內容，我才能幫您審查風險。"
@@ -127,6 +131,34 @@ def _first_call_dai_step(todos: list[PlanStep]) -> PlanStep | None:
         if s.skill == "call_dai":
             return s
     return None
+
+
+def _should_strip_misplaced_call_dai(
+    *,
+    user_text: str,
+    art_stripped: str,
+    itt: str,
+    ingress_requires_dai: bool,
+    review_pending_candidate: bool,
+    pending_review: bool,
+) -> bool:
+    """Ingress 非審查且無待審正文時，剝除 Planner 自創的 call_dai。"""
+    if art_stripped or ingress_requires_dai:
+        return False
+    if review_pending_candidate or pending_review:
+        return False
+    if itt == "check":
+        return False
+    if itt not in ("unknown", "direct_response", "action"):
+        return False
+    from dual_agent.ingress import extract_entities
+
+    entities = extract_entities(user_text)
+    if has_substantive_review_signals(user_text, entities):
+        return False
+    if looks_like_review_intent_without_artifact(user_text, entities):
+        return False
+    return True
 
 
 def _normalize_pending_call_dai_artifacts(todos: list[PlanStep], user_text: str) -> list[PlanStep]:
@@ -277,6 +309,18 @@ def validate_planner_output(
         prefix = "（規劃已校正：目前仍在等待待審內容，已移除 search_web，改為 ask_user。）"
         new_msg = f"{prefix}{message}".strip() if message else prefix
         return [_review_ask_user_step()], "check", "waiting_input", new_msg
+
+    if _todos_have_call_dai(todos) and _should_strip_misplaced_call_dai(
+        user_text=user_text,
+        art_stripped=art_stripped,
+        itt=itt,
+        ingress_requires_dai=ingress_requires_dai,
+        review_pending_candidate=review_pending_candidate,
+        pending_review=pending_review,
+    ):
+        prefix = "（規劃已校正：Ingress 非審查且無待審正文，已移除誤排的 call_dai。）"
+        new_msg = f"{prefix}{message}".strip() if message else prefix
+        return [], "direct_response", "answering", new_msg
 
     if (
         itt == "check"

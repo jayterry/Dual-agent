@@ -39,8 +39,10 @@ artifact_role（必填，其一）：
 3. 「幫我確認連結安不安全／是不是詐騙」+ URL → check，requires_dai=true，artifact_role=artifact
 4. 「我收到一則簡訊」無正文 → check，requires_dai=false，artifact_role=pending_review
 5. 【銀行】釣魚簡訊含 URL → check，requires_dai=true，artifact_role=artifact
-6. confidence 0.0–1.0；確定 ≥0.85；模糊降低
-7. reason 簡短（除錯用）
+6. 「我媽媽叫 Yuri／兒子叫小明」→ memory_update（純記人名）；若要求記住金額／匯款則非 memory
+7. 「兒子／熟人發訊息叫我投資／匯款／準備房產證」→ check（防詐敘事），requires_dai=true，artifact_role=artifact；**不是** memory_update
+8. confidence 0.0–1.0；確定 ≥0.85；模糊降低
+9. reason 簡短（除錯用）
 
 JSON 必含鍵：task_type, requires_dai, artifact_role, confidence, reason。
 
@@ -88,6 +90,26 @@ _FEW_SHOT = json.dumps(
                 "artifact_role": "artifact",
                 "confidence": 0.95,
                 "reason": "phishing_sms_body",
+            },
+        },
+        {
+            "input": "我兒子叫小明",
+            "output": {
+                "task_type": "memory_update",
+                "requires_dai": False,
+                "artifact_role": "none",
+                "confidence": 0.93,
+                "reason": "remember_child_name",
+            },
+        },
+        {
+            "input": "我兒子發訊息跟我說要拿300萬去投資，要我把房產證準備好",
+            "output": {
+                "task_type": "check",
+                "requires_dai": True,
+                "artifact_role": "artifact",
+                "confidence": 0.94,
+                "reason": "family_investment_scam_narrative",
             },
         },
     ],

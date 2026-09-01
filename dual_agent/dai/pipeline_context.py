@@ -7,7 +7,11 @@ from typing import Any
 
 from dual_agent.dai.schemas import DAIRequest
 
-SMS_REVIEW_DAG: tuple[str, ...] = (
+# 硬取代：主路徑改為雙路分析（舊規則／融合步驟保留於 STEP_HANDLERS，供離線 replay）
+SMS_REVIEW_DAG: tuple[str, ...] = ("dual_path_analyze",)
+
+# 舊版多步 DAG（僅供 ML feature replay／測試參考，不再由 run_sms_review_dag 執行）
+LEGACY_SMS_REVIEW_DAG: tuple[str, ...] = (
     "build_analysis_payload",
     "score_rules",
     "score_threat_intel",
@@ -48,3 +52,5 @@ class DefensePipelineContext:
     semantic: dict[str, Any] = field(default_factory=dict)
     report: dict[str, Any] = field(default_factory=dict)
     skill_trace: list[dict[str, Any]] = field(default_factory=list)
+    # 手機／桌面進度圖用（可選）
+    ui_pipeline_ctx: Any | None = None

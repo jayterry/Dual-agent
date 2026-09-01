@@ -38,6 +38,13 @@ def risk_report_to_dai_payload(report: dict[str, Any]) -> dict[str, Any]:
         "risk_user": report.get("risk_user"),
         "risk_score_user_fused": report.get("risk_score_total_user_fused"),
         "gate_tier": report.get("gate_tier"),
+        "engine": str(report.get("engine") or ""),
+        "path_a": dict(report.get("path_a") or {}) if report.get("path_a") else None,
+        "path_b": dict(report.get("path_b") or {}) if report.get("path_b") else None,
+        "narrator_text": report.get("narrator_text"),
+        "persona": dict(report.get("persona") or {}),
+        "relation_inferred": report.get("relation_inferred"),
+        "channel_inferred": report.get("channel_inferred"),
         "error": None,
     }
 

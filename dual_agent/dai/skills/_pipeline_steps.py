@@ -272,7 +272,31 @@ def step_fuse_risk_and_ueba(ctx: DefensePipelineContext) -> None:
     ctx.report = report
 
 
+def step_dual_path_analyze(ctx: DefensePipelineContext) -> None:
+    """硬取代主路徑：雙路 Path A / Path B + Narrator。"""
+    from dual_agent.dai.risk_analysis.dual_path import run_dual_path_analysis
+
+    req = ctx.req
+    # 若 pipeline source 與 request 不一致，以 ctx.source 為準寫入 UEBA 標籤
+    if not (req.source or "").strip():
+        req.source = ctx.source
+    report = run_dual_path_analysis(
+        req,
+        model=ctx.model,
+        base_url=ctx.base_url,
+        temperature=ctx.temperature,
+        source=ctx.source,
+        pipeline_ctx=ctx.ui_pipeline_ctx,
+    )
+    ctx.report = report
+    cs = report.get("component_scores") or {}
+    ctx.component_scores = {str(k): int(v) for k, v in cs.items() if isinstance(v, (int, float))}
+    ctx.text = (req.artifact or req.user_text or "").strip()
+
+
 STEP_HANDLERS = {
+    "dual_path_analyze": step_dual_path_analyze,
+    # Legacy（offline replay／單元測試仍可直接呼叫）
     "build_analysis_payload": step_build_analysis_payload,
     "score_rules": step_score_rules,
     "score_threat_intel": step_score_threat_intel,

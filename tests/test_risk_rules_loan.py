@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 from dual_agent.dai.risk_analysis.pipeline import run_risk_analysis
 from dual_agent.dai.risk_analysis.summary import coherent_safety_summary
 from dual_agent.dai.risk_analysis.rules import score_r_rules
@@ -24,30 +22,32 @@ def test_loan_scam_rules_hit() -> None:
     assert "loan_scam" in rule_ids or "nh_card_loan" in rule_ids or "unsolicited_loan_pitch" in rule_ids
 
 
-def test_loan_scam_recommended_action_not_continue_only() -> None:
-    req = DAIRequest(user_text="送審", artifact=_LOAN_SMS, sms_review=True)
-    semantic_stub = {
-        "r_llm_optional": 2,
-        "tier_h": 0,
-        "tier_i": 0,
-        "explanation": "",
-        "safety_summary": "此訊息存在較高的詐騙風險。",
-        "labels": [],
-        "skipped": False,
-    }
-    with patch(
-        "dual_agent.dai.skills._pipeline_steps.invoke_semantic_supplement",
-        return_value=semantic_stub,
-    ):
+def test_loan_scam_dual_path_not_continue() -> None:
+    import os
+
+    prev_pb = os.environ.get("DAI_DUAL_PATH_B")
+    prev_nr = os.environ.get("DAI_DUAL_NARRATOR")
+    os.environ["DAI_DUAL_PATH_B"] = "0"
+    os.environ["DAI_DUAL_NARRATOR"] = "0"
+    try:
+        req = DAIRequest(user_text="送審", artifact=_LOAN_SMS, sms_review=True)
         report = run_risk_analysis(req)
-    score = int(report.get("risk_score") or 0)
-    comps = report.get("component_scores") or {}
-    r_rules = int(comps.get("r_rules") or 0)
-    assert r_rules >= 25
-    verdict = str(report.get("verdict") or verdict_from_score(score))
-    action = recommended_cai_action(verdict, score, r_rules=r_rules)
-    assert action == "ask_user"
-    assert score >= 20
+        score = int(report.get("risk_score") or 0)
+        assert report.get("engine") == "fraud_dual"
+        assert report.get("path_a")
+        verdict = str(report.get("verdict") or verdict_from_score(score))
+        action = recommended_cai_action(verdict, score, r_rules=0)
+        assert action in ("ask_user", "block")
+        assert score >= 20
+    finally:
+        if prev_pb is None:
+            os.environ.pop("DAI_DUAL_PATH_B", None)
+        else:
+            os.environ["DAI_DUAL_PATH_B"] = prev_pb
+        if prev_nr is None:
+            os.environ.pop("DAI_DUAL_NARRATOR", None)
+        else:
+            os.environ["DAI_DUAL_NARRATOR"] = prev_nr
 
 
 def test_coherent_summary_downgrades_mismatch() -> None:

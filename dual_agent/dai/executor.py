@@ -40,7 +40,7 @@ def run_dai_pipeline_step(name: str, pipe: DefensePipelineContext) -> SkillResul
     try:
         fn(pipe)
         summary = f"{name} ok"
-        if name == "fuse_risk_and_ueba" and pipe.report:
+        if name in ("dual_path_analyze", "fuse_risk_and_ueba") and pipe.report:
             summary = str(pipe.report.get("archive_note") or summary)[:200]
             return SkillResult(
                 ok=True,

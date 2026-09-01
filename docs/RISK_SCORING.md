@@ -1,13 +1,88 @@
 # DAI 風險評分公式與說明
 
-本文件說明 Dual-agent 系統中 **DAI（Defense Agent Intelligence）** 如何對簡訊、通知、連結等內容計算 **0–100 風險分**，以及如何產出判定（`block` / `warn` / `allow`）與使用者可讀的風險卡。
+本文件說明 ScamSentinel 系統中 **DAI（Defense Agent Intelligence）** 如何對簡訊、通知、連結等內容計算風險，以及如何產出判定與使用者可讀風險卡。
 
-> 相關程式：`dual_agent/dai/skills/_pipeline_steps.py`、`dual_agent/dai/risk_analysis/`  
-> 相關文件：[FISHBONE.md](./FISHBONE.md)、[Prompt _ Track A.txt](../Prompt%20_%20Track%20A.txt)
+> **現行主路徑（2026-08 硬取代）**：`SMS_REVIEW_DAG = ("dual_path_analyze",)`  
+> 引擎：`dual_agent/dai/fraud_dual`（桌面 ML 雙路）＋適配層 `risk_analysis/dual_path.py`。  
+> - Path A：`threat_score` + `context_score`（**禁止數值融合**；並列輸出）  
+> - Path B：純 LLM（不讀 Path A 分數；失敗則略過）  
+> - Narrator：解釋 Path A（同一組 DAI Ollama）  
+> - CAI 相容門檻：`risk_score = max(threat, context) * 100` → `verdict` / `recommended_cai_action`
+>
+> **舊規則／權重／銀行 LR 融合**：模組仍保留於 `risk_analysis/`（離線訓練／單元測試），**不再**作為 `run_sms_review_dag` 產品主路徑。見下文「附錄：舊融合公式」。
+>
+> 相關程式：`dual_agent/dai/skills/_pipeline_steps.py`（`step_dual_path_analyze`）、`dual_agent/dai/fraud_dual/`  
+> 相關文件：[FISHBONE.md](./FISHBONE.md)
 
 ---
 
-## 1. 設計原則
+## 0. 雙路主路徑（產品）
+
+```
+dual_path_analyze
+  → extract_shared + predict_threat + score_context → Result_A
+  → (可選) Path B Ollama → Result_B
+  → (可選) Narrator
+  → report.path_a / path_b + gate risk_score
+```
+
+| 欄位 | 說明 |
+|------|------|
+| `path_a.threat_score_100` | Threat 0–100 |
+| `path_a.context_score_100` | Context 0–100 |
+| `path_a.reasons` / `warnings` | Path A 原因與警示 |
+| `path_b.*` | Path B 對照（或 `skipped`） |
+| `risk_score` | `max(threat, context)`，僅供 CAI 動作門檻 |
+
+建圖欄位（persona）：
+
+| 欄位 | 來源 |
+|------|------|
+| `age_band` / `occupation` / `primary_apps` / `invest_exp` | 本機 `data/user_profile.sqlite`（對話／設定寫入） |
+| `channel` | 系統推斷（可參照 `primary_apps`） |
+| `relation_type` | 系統推斷；優先命中 Memory／sqlite `relations` 人名（如小明＝兒子 → Family） |
+
+`known_relations` 經 `sender_tech_context` 傳入雙路推斷。環境變數同前（`DAI_DUAL_INFER_*`）。CAI 防詐敘事不再被 Memory 捷徑攔截（階段1）。
+
+環境變數：`DAI_DUAL_PATH_B`（預設開）、`DAI_DUAL_NARRATOR`（預設開）。
+
+### 後續計畫：依常用 App 擴充 `channel` 節點（未開工）
+
+**現況（不得跳過重訓硬擴）**
+
+- `channel`／`primary_apps` 皆綁封閉詞表 `CHANNELS`：`LINE`、`Telegram`、`SMS`、`Email`、`Facebook`、`Website`（見 `fraud_dual/shared/constants.py`、`schemas.py`）。
+- Path A GNN 的 channel 節點為對該詞表的 one-hot（+ familiar 旗標）；**維度與權重綁死已訓練模型**。
+- 常用 App 今日角色僅為：推斷本則 `channel` 的先驗、計算 `channel_is_familiar`（`channel in primary_apps`），**不是**動態新增節點類型。
+
+**目標**
+
+- 讓「常用 App」可對應／擴充到更貼近真實通訊生態的 channel（例如 WhatsApp、Instagram、Discord 等），並保持 Path A 分數可比與可重訓。
+
+**建議階段**
+
+| 階段 | 內容 | 產物／通過條件 |
+|------|------|----------------|
+| **P0 對照表（低風險）** | App 套件／顯示名 → 既有六種 `CHANNELS` 的映射表（Android 挑選＋後端 `_normalize_apps` 別名）；未對應者本機可記、不進圖 | 挑選 LINE／Messages 可穩定產出 `LINE`／`SMS`；familiar 行為正確 |
+| **P1 詞表擴充設計** | 選定要新增的 channel 清單、先驗風險 `CHANNEL_PRIOR_RISK`、與訓練標註規則；決定 one-hot 維度變更策略 | RFC：新詞表＋相容舊 checkpoint 的策略（重訓／寬填充） |
+| **P2 資料＋重訓** | 標註／合成資料含新 channel；重訓 Threat／Context；更新 `fraud_dual_models` | 驗證集指標不劣於舊模型；schema 與推斷 LLM prompt 同步 |
+| **P3 產品接线** | 推斷 `infer_message_channel`、桌面／手機 profile、風險卡文案、`RISK_SCORING`／`MOBILE` 文件 | E2E：常用 App 含新管道時熟悉度與推斷合理 |
+
+**明确不做（此計畫範圍外）**
+
+- 不把任意已安裝 App 的 packageName 直接當成 GNN channel 類別（稀疏爆炸、無法泛化）。
+- 不在未重訓情況下硬改 `CHANNELS` 長度載入舊權重。
+
+**觸發時機**：雙路徑穩定、App 挑選與 profile 同步上線後，再啟動 P1。
+
+---
+
+## 附錄：舊融合公式（已非主路徑）
+
+> 以下為硬取代前的規則＋權重／ml_lr 說明，供對照與離線研究。
+
+---
+
+## 1. 設計原則（舊）
 
 | 原則 | 說明 |
 |------|------|
@@ -21,9 +96,9 @@
 
 ---
 
-## 2. 評分管線（7 步 DAG）
+## 2. 評分管線（舊 7 步 DAG）
 
-送審（`sms_review`）時，DAI 依固定順序執行下列 skills：
+送審（`sms_review`）時，舊版 DAI 依固定順序執行下列 skills：
 
 ```
 build_analysis_payload

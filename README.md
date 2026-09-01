@@ -1,6 +1,6 @@
-# Dual-agent
+# ScamSentinel
 
-`Dual-agent` 是一個以 CAI / DAI 雙層架構為核心的本地 AI 專案，用來處理任務導向對話、風險審查與安全分析流程。
+`ScamSentinel`（倉庫目錄仍為 `Dual-agent`）是以 CAI / DAI 雙層架構為核心的本地 AI 專案，用來處理任務導向對話、風險審查與安全分析流程。
 
 ## 主要內容
 

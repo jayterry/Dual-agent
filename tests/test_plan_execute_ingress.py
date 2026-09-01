@@ -409,3 +409,39 @@ def test_iceland_context_does_not_create_pending_review_or_search() -> None:
             out = run_plan_and_execute(user_text="我現在在冰島", ctx=ctx)
     assert out.plan == []
     assert not ctx.policy_state.get("pending_review")
+
+
+def test_it_guess_call_dai_meta_only_skips_pending_review() -> None:
+    """非審查 Ingress 的 artifact_meta_only 不應污染 pending_review。"""
+    ctx = SkillContext(user_input="")
+    user_text = "做it有很多方面，你猜是哪個方面的"
+
+    def bad_planner(**_kwargs: str) -> PlannerOutput:
+        return PlannerOutput(
+            task_type="check",
+            task_state="running",
+            todos=[PlanStep(skill="call_dai", args={})],
+            message="",
+        )
+
+    def fake_replan(**_kwargs: str) -> ReplanOutput:
+        return ReplanOutput(
+            complete=True,
+            final_answer="我猜你可能做資安方面的工作。",
+            updated_todos=[],
+            task_state="completed",
+            waiting_input=False,
+            user_prompt="",
+        )
+
+    with patch("dual_agent.cai.plan_execute.invoke_planner", side_effect=bad_planner):
+        with patch(
+            "dual_agent.cai.plan_execute.validate_planner_output",
+            side_effect=lambda **kw: (kw["todos"], kw["task_type"], kw["task_state"], kw["message"]),
+        ):
+            with patch("dual_agent.cai.plan_execute.invoke_replan", side_effect=fake_replan):
+                out = run_plan_and_execute(user_text=user_text, ctx=ctx)
+
+    assert not ctx.policy_state.get("pending_review")
+    assert "請貼上完整簡訊" not in (out.answer or "")
+    assert "資安" in (out.answer or "")

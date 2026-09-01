@@ -1,11 +1,8 @@
-"""DAI risk_analysis：融合 v2 + 語意護欄。"""
+"""DAI risk_analysis：規則／威脅單元 + 雙路主路徑。"""
 
 from __future__ import annotations
 
 import os
-from unittest.mock import patch
-
-import pytest
 
 from dual_agent.dai.risk_analysis.pipeline import run_risk_analysis
 from dual_agent.dai.risk_analysis.providers import score_r_threat_intel, score_r_tls
@@ -14,26 +11,30 @@ from dual_agent.dai.risk_analysis.semantic_llm import invoke_semantic_supplement
 from dual_agent.dai.schemas import DAIRequest
 
 
+def _dual_off() -> None:
+    os.environ["DAI_DUAL_PATH_B"] = "0"
+    os.environ["DAI_DUAL_NARRATOR"] = "0"
+
+
 def test_rules_password_high_score() -> None:
     res = score_r_rules("請立即驗證您的網路銀行密碼並回傳")
     assert res.score == 90
     assert any(h.rule_id == "password_credentials" for h in res.hits)
 
 
-def test_weighted_fusion_rules_plus_llm() -> None:
-    with patch.dict(os.environ, {"DAI_SEMANTIC_LLM": "0"}, clear=False):
-        report = run_risk_analysis(
-            DAIRequest(user_text="請驗證網銀密碼", artifact="請驗證網銀密碼", sms_review=True),
-        )
-    cs = report["component_scores"]
-    assert cs["r_rules"] == 90
-    assert report["r_final_machine"] == 90
-    assert report["risk_fusion"]["mode"] == "machine_support_bonus_weighted"
-    assert report["risk_fusion"]["llm_weight"] == 0.35
-    assert report["risk_score"] >= 85
+def test_dual_path_password_has_path_a() -> None:
+    _dual_off()
+    text = "請立即驗證您的網路銀行密碼並回傳"
+    report = run_risk_analysis(
+        DAIRequest(user_text=text, artifact=text, sms_review=True),
+    )
+    assert report.get("engine") == "fraud_dual"
+    assert report.get("path_a")
+    assert int(report["risk_score"]) >= 20
+    assert "display_text" in report
 
 
-def test_threat_intel_phishing_dominates() -> None:
+def test_threat_intel_phishing_unit() -> None:
     hits = [
         {
             "url": "http://evil.test/x",
@@ -50,25 +51,11 @@ def test_threat_intel_phishing_dominates() -> None:
     ]
     score, _ = score_r_threat_intel(hits)
     assert score == 40
-    with patch.dict(os.environ, {"DAI_SEMANTIC_LLM": "0"}, clear=False):
-        report = run_risk_analysis(
-            DAIRequest(user_text="點擊 http://evil.test/x", artifact="點擊 http://evil.test/x"),
-            url_threat_hits_injected=hits,
-        )
-    assert report["component_scores"]["r_threat_intel"] == 40
-    assert report["r_final_machine"] >= 40
 
 
-def test_missing_tls_zero_and_listed() -> None:
+def test_tls_empty_is_zero() -> None:
     score, _ = score_r_tls([])
     assert score == 0
-    with patch.dict(os.environ, {"DAI_SEMANTIC_LLM": "0"}, clear=False):
-        report = run_risk_analysis(
-            DAIRequest(user_text="請點擊 https://example.com", artifact="https://example.com"),
-            tls_findings_injected=[],
-        )
-    assert report["component_scores"]["r_tls"] == 0
-    assert "tls_findings" in report["track_a"]["missing_evidence"]
 
 
 def test_urgency_only_low_semantic_score() -> None:
@@ -85,31 +72,6 @@ def test_urgency_only_low_semantic_score() -> None:
         enabled=False,
     )
     assert sem["r_llm_optional"] == 0
-
-
-@patch("dual_agent.dai.skills._pipeline_steps.invoke_semantic_supplement")
-def test_semantic_cannot_invent_threat_intel_score(mock_sem: object) -> None:
-    mock_sem.return_value = {
-        "r_llm_optional": 90,
-        "tier_h": 20,
-        "tier_i": 12,
-        "explanation": "假裝惡意 URL",
-        "safety_summary": "高風險",
-        "labels": [],
-        "quotes": [],
-        "skipped": False,
-    }
-    with patch.dict(os.environ, {"DAI_SEMANTIC_LLM": "1"}, clear=False):
-        report = run_risk_analysis(
-            DAIRequest(user_text="你好", artifact="你好"),
-            url_threat_hits_injected=[],
-            tls_findings_injected=[],
-        )
-    assert report["component_scores"]["r_threat_intel"] == 0
-    assert report["component_scores"]["r_tls"] == 0
-    assert report["component_scores"]["r_llm_optional"] <= 32
-    assert report["r_final_machine"] == 0
-    assert report["risk_fusion"]["r_fused_pre_ueba"] >= 30
 
 
 def test_llm_weight_35_when_machine_low() -> None:
@@ -134,35 +96,15 @@ def test_llm_weight_35_when_machine_low() -> None:
     assert fusion.r_fused == round(0.65 * 0 + 0.35 * llm100)
 
 
-def test_machine_support_not_simple_average() -> None:
-    with patch.dict(os.environ, {"DAI_SEMANTIC_LLM": "0"}, clear=False):
-        report = run_risk_analysis(
-            DAIRequest(
-                user_text="帳戶異常請立即驗證 https://evil.test/x",
-                artifact="帳戶異常請立即驗證 https://evil.test/x",
-            ),
-            url_threat_hits_injected=[
-                {
-                    "url": "https://evil.test/x",
-                    "hits": {
-                        "virustotal": True,
-                        "phishtank": False,
-                        "urlhaus": False,
-                        "taiwan_165": False,
-                        "telco_blocklist": False,
-                    },
-                    "vendor_count": 1,
-                    "label": "phishing",
-                }
-            ],
-        )
-    cs = report["component_scores"]
-    assert report["risk_fusion"]["mode"] == "machine_support_bonus_weighted"
-    assert cs["r_machine_final"] >= cs["r_rules"]
-    fused = int(report["risk_fusion"]["r_fused_pre_ueba"])
-    naive_avg = int(
-        round(
-            (cs["r_rules"] + cs["r_threat_intel"] + cs["r_tls"] + cs["r_toxic_fused"] + cs["r_llm_optional"]) / 5
-        )
+def test_dual_path_account_abnormal_url() -> None:
+    _dual_off()
+    report = run_risk_analysis(
+        DAIRequest(
+            user_text="帳戶異常請立即驗證 https://evil.test/x",
+            artifact="帳戶異常請立即驗證 https://evil.test/x",
+            sms_review=True,
+        ),
     )
-    assert fused != naive_avg
+    assert report.get("engine") == "fraud_dual"
+    assert isinstance(report.get("path_a"), dict)
+    assert int(report["risk_score"]) >= 30

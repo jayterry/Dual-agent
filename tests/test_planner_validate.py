@@ -125,3 +125,87 @@ def test_strips_search_for_capability_with_typo() -> None:
 
 def test_meta_detects_single_ni() -> None:
     assert meta_assistant_or_chat_scope("你")
+
+
+def test_strips_call_dai_when_unknown_ingress_no_artifact() -> None:
+    """IT 閒聊猜謎：Planner 誤排 call_dai 應被剝除。"""
+    todos = [PlanStep(skill="call_dai", args={})]
+    out_t, tt, ts, msg = validate_planner_output(
+        user_text="做it有很多方面，你猜是哪個方面的",
+        task_type="check",
+        task_state="running",
+        todos=todos,
+        message="需要審查這則訊息",
+        ingress_detected_task_type="unknown",
+        ingress_artifact_text="",
+        ingress_requires_dai=False,
+        review_pending_candidate=False,
+        pending_review=False,
+    )
+    assert out_t == []
+    assert tt == "direct_response"
+    assert ts == "answering"
+    assert "校正" in msg
+    assert "call_dai" in msg
+
+
+def test_strips_call_dai_when_action_ingress_no_artifact() -> None:
+    todos = [PlanStep(skill="call_dai", args={})]
+    out_t, tt, ts, _ = validate_planner_output(
+        user_text="你好，今天心情不錯",
+        task_type="check",
+        task_state="running",
+        todos=todos,
+        message="",
+        ingress_detected_task_type="action",
+        ingress_artifact_text="",
+        ingress_requires_dai=False,
+        review_pending_candidate=False,
+        pending_review=False,
+    )
+    assert out_t == []
+    assert tt == "direct_response"
+    assert ts == "answering"
+
+
+def test_keeps_call_dai_when_review_pending_candidate() -> None:
+    """審查候選仍應走 ask_user，不由 misplaced strip 攔截。"""
+    todos = [PlanStep(skill="call_dai", args={})]
+    out_t, tt, ts, msg = validate_planner_output(
+        user_text="我收到一則簡訊",
+        task_type="check",
+        task_state="new",
+        todos=todos,
+        message="",
+        ingress_detected_task_type="unknown",
+        ingress_artifact_text="",
+        ingress_requires_dai=False,
+        review_pending_candidate=True,
+        pending_review=False,
+    )
+    assert len(out_t) == 1
+    assert out_t[0].skill == "ask_user"
+    assert tt == "check"
+    assert ts == "waiting_input"
+    assert "待審" in msg
+
+
+def test_keeps_call_dai_when_check_ingress_with_artifact() -> None:
+    body = "【XX銀行】您的帳戶異常，請點擊 https://fake-bank.com 完成驗證"
+    todos: list[PlanStep] = []
+    out_t, tt, ts, _ = validate_planner_output(
+        user_text=f"幫我看這是不是詐騙：{body}",
+        task_type="action",
+        task_state="running",
+        todos=todos,
+        message="",
+        ingress_detected_task_type="check",
+        ingress_artifact_text=body,
+        ingress_requires_dai=True,
+        review_pending_candidate=False,
+        pending_review=False,
+    )
+    assert len(out_t) == 1
+    assert out_t[0].skill == "call_dai"
+    assert tt == "check"
+    assert ts == "running"

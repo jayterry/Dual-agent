@@ -109,11 +109,27 @@ def _handle_pending_confirm(
             temperature=temperature,
         )
     if intent == "affirm":
+        from dual_agent.cai.profile_store import (
+            looks_like_money_not_name,
+            resolve_profile_user_id,
+            sync_relations_from_user_facts,
+        )
+
+        if looks_like_money_not_name(str(value or "")):
+            _clear_pending_memory(ctx)
+            return _outcome(
+                "這比較像金額或數字，我不會當成姓名記住。若要記人名，請告訴我對方怎麼稱呼。",
+                task_state="completed",
+            )
         ctx.policy_state["user_facts"] = _apply_confirmed_relation(
             ctx.policy_state.get("user_facts"),
             relation,
             value,
             mode=mode,
+        )
+        sync_relations_from_user_facts(
+            ctx.policy_state.get("user_facts"),
+            user_id=resolve_profile_user_id(ctx),
         )
         _clear_pending_memory(ctx)
         ctx.policy_state.pop("pending_review", None)
@@ -190,9 +206,15 @@ def _handle_forget(
                 task_state="waiting_input",
             )
     if rel:
+        from dual_agent.cai.profile_store import resolve_profile_user_id, sync_relations_from_user_facts
+
         ctx.policy_state["user_facts"] = clear_relation_in_user_facts(
             ctx.policy_state.get("user_facts"),
             rel,
+        )
+        sync_relations_from_user_facts(
+            ctx.policy_state.get("user_facts"),
+            user_id=resolve_profile_user_id(ctx),
         )
         _clear_pending_memory(ctx)
         ctx.policy_state.pop("pending_review", None)
@@ -261,6 +283,8 @@ def _validate_remember(
     uf: dict[str, Any],
 ) -> tuple[str, str, str] | None:
     """回傳 (relation, value, mode) 或 None 表示應 clarify。"""
+    from dual_agent.cai.profile_store import looks_like_money_not_name
+
     rel = normalize_relation(decision.relation or decision.raw_relation)
     val = (decision.value or decision.raw_value or "").strip()
     mode = decision.mode or (
@@ -269,6 +293,8 @@ def _validate_remember(
     if mode not in ("set", "append"):
         mode = "set" if decision.intent == "remember_set" else "append"
     if not rel or not val:
+        return None
+    if looks_like_money_not_name(val):
         return None
     relations: dict[str, list[str]] = dict(uf.get("relations") or {})
     if decision.intent == "remember_append" and rel not in relations:
@@ -425,12 +451,18 @@ def handle_memory_turn(
         return None
 
     if decision.intent == "forget":
+        from dual_agent.cai.profile_store import resolve_profile_user_id, sync_relations_from_user_facts
+
         rel = normalize_relation(decision.relation or decision.raw_relation)
         if not rel:
             return _handle_forget(user_text, ctx=ctx, uf=uf)
         ctx.policy_state["user_facts"] = clear_relation_in_user_facts(
             ctx.policy_state.get("user_facts"),
             rel,
+        )
+        sync_relations_from_user_facts(
+            ctx.policy_state.get("user_facts"),
+            user_id=resolve_profile_user_id(ctx),
         )
         _clear_pending_memory(ctx)
         ctx.policy_state.pop("pending_review", None)

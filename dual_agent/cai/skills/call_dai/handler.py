@@ -26,6 +26,16 @@ ARGS_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "description": "預設 true：簡訊審查（Defense 先排 todos 再執行）",
         },
+        "persona": {
+            "type": "object",
+            "description": "雙路建圖：age_band/occupation/relation_type/channel/primary_apps/invest_exp",
+        },
+        "age_band": {"type": "string"},
+        "occupation": {"type": "string"},
+        "relation_type": {"type": "string"},
+        "channel": {"type": "string"},
+        "primary_apps": {"type": "array", "items": {"type": "string"}},
+        "invest_exp": {"type": "string"},
     },
     "required": [],
 }
@@ -102,10 +112,15 @@ def _extract_report_from_result(out: DAIResult) -> dict[str, Any] | None:
         if not isinstance(data, dict):
             continue
         nested = data.get("report")
-        if isinstance(nested, dict) and nested.get("component_scores"):
+        if isinstance(nested, dict) and (
+            nested.get("component_scores")
+            or nested.get("path_a")
+            or nested.get("engine") == "fraud_dual"
+            or nested.get("display_text")
+        ):
             best = nested
             continue
-        if data.get("component_scores"):
+        if data.get("component_scores") or data.get("path_a"):
             best = data
     return best
 
@@ -149,11 +164,49 @@ def handle(args: dict[str, Any], ctx: SkillContext) -> SkillResult:
         )
 
     review_source = str(ctx.policy_state.get("review_source") or "").strip()
+    persona: dict[str, Any] = {}
+    if isinstance(args.get("persona"), dict):
+        persona.update(args["persona"])
+    for key in ("age_band", "occupation", "relation_type", "channel", "invest_exp"):
+        if args.get(key) not in (None, ""):
+            persona.setdefault(key, args.get(key))
+    if isinstance(args.get("primary_apps"), list):
+        persona.setdefault("primary_apps", args.get("primary_apps"))
+    # 桌面／CAI 可把 persona 放在 policy_state
+    ps_persona = ctx.policy_state.get("dai_persona")
+    if isinstance(ps_persona, dict):
+        for k, v in ps_persona.items():
+            persona.setdefault(k, v)
+    # 本機 profile 庫補洞（依 session 的 profile_user_id）
+    try:
+        from dual_agent.cai.profile_store import (
+            known_relations,
+            resolve_profile_user_id,
+            to_dai_persona,
+        )
+
+        uid = resolve_profile_user_id(ctx)
+        for k, v in to_dai_persona(uid).items():
+            persona.setdefault(k, v)
+        kr = ctx.policy_state.get("known_relations")
+        if not isinstance(kr, dict):
+            kr = known_relations(uid)
+    except Exception:  # noqa: BLE001
+        kr = ctx.policy_state.get("known_relations") if isinstance(
+            ctx.policy_state.get("known_relations"), dict
+        ) else {}
+
+    sender_tech = dict(ctx.policy_state.get("sender_tech_context") or {})
+    if isinstance(kr, dict) and kr:
+        sender_tech["known_relations"] = kr
+
     req = DAIRequest(
         user_text=user_text,
         artifact=artifact,
         context_pack=context_pack,
         sms_review=sms_review,
+        persona=persona,
+        sender_tech_context=sender_tech or None,
         source=review_source or "desktop",
     )
     try:

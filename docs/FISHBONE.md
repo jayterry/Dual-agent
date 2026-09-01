@@ -1,6 +1,6 @@
-# Dual-agent 專案魚骨圖
+# ScamSentinel 專案魚骨圖
 
-本文件整理 Dual-agent（CAI + DAI）專案的四個維度：**主要目標**、**目前進度**、**功能**、**未來規劃**。魚頭為產品主成果；主幹向左分出四條大骨。
+本文件整理 ScamSentinel（CAI + DAI）專案的四個維度：**主要目標**、**目前進度**、**功能**、**未來規劃**。魚頭為產品主成果；主幹向左分出四條大骨。
 
 > 相關文件：[MOBILE.md](../MOBILE.md)、[Prompt _ Track A.txt](../Prompt%20_%20Track%20A.txt)、[Agent Skills Added.md](../Agent%20Skills%20Added.md)、[SKILLS_MATRIX.md](./SKILLS_MATRIX.md)
 

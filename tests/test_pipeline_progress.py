@@ -38,7 +38,7 @@ def test_set_pipeline_detail() -> None:
     assert st["detail_label_zh"] == "風險分析"
     ids = [n["id"] for n in st["nodes"]]
     assert "dai_defense_llm" in ids
-    assert "dai_score_rules" in ids
+    assert "dai_dual_path_analyze" in ids
     assert ids.index("dai_defense_llm") < ids.index("replan_llm")
 
 
@@ -56,7 +56,7 @@ def test_review_init_includes_dai_dag() -> None:
     st = get_pipeline_status(ctx)
     ids = [n["id"] for n in st["nodes"]]
     assert "dai_defense_llm" in ids
-    assert "dai_fuse_risk_and_ueba" in ids
+    assert "dai_dual_path_analyze" in ids
     assert "finish" in ids
 
 
@@ -80,4 +80,4 @@ def test_splice_dai_only_once() -> None:
     splice_dai_nodes(ctx)
     n2 = len(get_pipeline_status(ctx)["nodes"])
     assert n1 == n2
-    assert n1 == 5 + 8
+    assert n1 == 5 + 2  # chat 5 + dai_defense_llm + dual_path_analyze
