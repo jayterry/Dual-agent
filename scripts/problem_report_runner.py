@@ -14,6 +14,8 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from dual_agent.cai.plan_execute import run_plan_and_execute
+from dual_agent.cai.hybrid.gates import allowed_skills_for
+from dual_agent.cai.hybrid.schemas import MessageFeatures
 from dual_agent.cai.planner_validate import validate_planner_output
 from dual_agent.cai.review_entry_eligibility import looks_like_review_intent_without_artifact
 from dual_agent.cai.schemas import PlanStep, PlannerOutput, ReplanOutput
@@ -242,6 +244,59 @@ def _expect_bool(actual: bool, expect: dict[str, Any], key: str, positive: bool 
     return actual == wanted if positive else actual != wanted
 
 
+def _message_features_from_dict(raw: dict[str, Any]) -> MessageFeatures:
+    return MessageFeatures.model_validate(raw)
+
+
+def _message_features_mock_factory(turn_specs: list[dict[str, Any]], default: dict[str, Any]):
+    calls = {"i": 0}
+
+    def _fn(**_kwargs: Any) -> MessageFeatures:
+        idx = min(calls["i"], max(len(turn_specs) - 1, 0))
+        calls["i"] += 1
+        raw = turn_specs[idx] if turn_specs else default
+        return _message_features_from_dict(raw)
+
+    return _fn
+
+
+def _run_message_features_scenario(
+    result: ProblemAuditResult,
+    scenario: dict[str, Any],
+    default_severity: str,
+) -> None:
+    sid = str(scenario["id"])
+    for turn in scenario.get("turns") or []:
+        user_text = str(turn["user"])
+        expect = dict(turn.get("expect") or {})
+        group = str(turn.get("group") or "")
+        severity = str(turn.get("severity_on_fail") or scenario.get("severity_on_fail") or default_severity)
+        raw = dict(turn.get("message_features") or {})
+        features = _message_features_from_dict(raw)
+        goal = features.primary_goal
+        if "primary_goal" in expect and goal != str(expect["primary_goal"]):
+            result.add(
+                sid,
+                user_text,
+                severity,
+                f"primary_goal 應為 {expect['primary_goal']}；實際 {goal}",
+                group,
+            )
+        allowed = allowed_skills_for(features)
+        if "allowed_skills" in expect and sorted(allowed) != sorted(expect["allowed_skills"]):
+            result.add(
+                sid,
+                user_text,
+                severity,
+                f"allowed_skills 應為 {expect['allowed_skills']}；實際 {allowed}",
+                group,
+            )
+        if expect.get("out_of_product_scope") and not features.gaps.out_of_product_scope:
+            result.add(sid, user_text, severity, "gaps.out_of_product_scope 應為 true", group)
+        if expect.get("missing_body") and not features.gaps.missing_body_for_review:
+            result.add(sid, user_text, severity, "gaps.missing_body_for_review 應為 true", group)
+
+
 def _run_ingress_scenario(
     result: ProblemAuditResult,
     scenario: dict[str, Any],
@@ -370,30 +425,45 @@ def _run_plan_execute_multiturn(
     memory_off_patch = (
         None if (allow_memory and memory_rules) else patch("dual_agent.cai.plan_execute.try_handle_memory_turn", return_value=None)
     )
+    mf_turns = [
+        dict(t.get("message_features") or mock.get("message_features_default") or {"turn_intent": {"primary_goal": "out_of_scope"}})
+        for t in scenario.get("turns") or []
+    ]
+    mf_default = dict(
+        mock.get("message_features_default") or {"turn_intent": {"primary_goal": "out_of_scope"}}
+    )
+    hybrid_on = bool(mock.get("hybrid_enabled", True))
+    mf_patch = (
+        patch(
+            "dual_agent.cai.plan_execute.invoke_message_features",
+            side_effect=_message_features_mock_factory(mf_turns, mf_default),
+        )
+        if hybrid_on
+        else None
+    )
+    hybrid_patch = patch("dual_agent.cai.plan_execute.hybrid_enabled", return_value=hybrid_on) if hybrid_on else None
     execute_patch = (
         patch("dual_agent.cai.plan_execute.execute_step", side_effect=_execute_with_track) if execute_preset else None
     )
 
-    with planner_patch, replan_patch:
-        if memory_ctx:
-            with memory_ctx:
-                if execute_patch:
-                    with execute_patch:
-                        _run_turns()
-                else:
-                    _run_turns()
-        elif memory_off_patch:
-            with memory_off_patch:
-                if execute_patch:
-                    with execute_patch:
-                        _run_turns()
-                else:
-                    _run_turns()
-        elif execute_patch:
-            with execute_patch:
-                _run_turns()
-        else:
-            _run_turns()
+    patches = [planner_patch, replan_patch]
+    if mf_patch:
+        patches.append(mf_patch)
+    if hybrid_patch:
+        patches.append(hybrid_patch)
+    if memory_ctx:
+        patches.append(memory_ctx)
+    elif memory_off_patch:
+        patches.append(memory_off_patch)
+    if execute_patch:
+        patches.append(execute_patch)
+
+    from contextlib import ExitStack
+
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        _run_turns()
 
 
 def _run_memory_multiturn(
@@ -577,6 +647,7 @@ def run_problem_scenarios(problem_dir: Path, spec: dict[str, Any]) -> ProblemAud
         "ingress": _run_ingress_scenario,
         "validate": _run_validate_scenario,
         "semantic_router": _run_semantic_router_scenario,
+        "message_features": _run_message_features_scenario,
         "plan_execute_multiturn": _run_plan_execute_multiturn,
         "memory_multiturn": _run_memory_multiturn,
         "risk_analysis": _run_risk_analysis_scenario,

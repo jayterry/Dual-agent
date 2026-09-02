@@ -14,7 +14,9 @@ NodeKind = Literal["system", "llm", "skill", "dai_step"]
 
 CHAT_STAGES: list[tuple[str, str]] = [
     ("ingress", "理解訊息"),
+    ("message_features", "理解意圖"),
     ("memory", "記憶判斷"),
+    ("memory_skipped", "記憶略過"),
     ("planner", "規劃任務"),
     ("execute", "執行技能"),
     ("replan", "整理回覆"),
@@ -28,7 +30,9 @@ REVIEW_STAGES: list[tuple[str, str]] = [
 
 _STAGE_TO_NODE: dict[str, str] = {
     "ingress": "ingress",
+    "message_features": "message_features",
     "memory": "memory_llm",
+    "memory_skipped": "memory_llm",
     "planner": "planner_llm",
     "execute": "executor_skill",
     "replan": "replan_llm",
@@ -93,6 +97,7 @@ def _new_node(
 def _chat_base_nodes() -> list[dict[str, str]]:
     return [
         _new_node(node_id="ingress", kind="system", label_zh="載入記憶與上下文"),
+        _new_node(node_id="message_features", kind="llm", label_zh="理解意圖"),
         _new_node(node_id="memory_llm", kind="llm", label_zh="Memory Manager"),
         _new_node(node_id="planner_llm", kind="llm", label_zh="Planner"),
         _new_node(node_id="executor_skill", kind="skill", label_zh="執行技能"),
@@ -280,13 +285,31 @@ def set_pipeline_stage(
         splice_dai_nodes(ctx)
         pipe = _get_pipe(ctx)
 
+    if stage == "memory_skipped":
+        advance_pipeline_node(ctx, "memory_llm")
+        pipe = _get_pipe(ctx)
+        for n in pipe.get("nodes") or []:
+            if isinstance(n, dict) and n.get("id") == "memory_llm":
+                n["label_zh"] = "Memory 略過"
+                n["status"] = "done"
+        pipe["headline_zh"] = "Memory 略過"
+        pipe["updated_at"] = time.time()
+        return
+
     if stage == "execute":
         advance_pipeline_node(ctx, "executor_skill", model=m or OLLAMA_MODEL, skill=d)
     elif node_id:
         default_model = ""
         if node_id == "memory_llm":
             default_model = m or cai_memory_model()
-        elif node_id in ("planner_llm", "replan_llm", "dai_plan", "dai_defense_llm", "dai_narrator"):
+        elif node_id in (
+            "planner_llm",
+            "replan_llm",
+            "dai_plan",
+            "dai_defense_llm",
+            "dai_narrator",
+            "message_features",
+        ):
             default_model = m or OLLAMA_MODEL
         advance_pipeline_node(ctx, node_id, model=default_model, skill=d if node_id == "executor_skill" else "")
 
@@ -329,7 +352,21 @@ def advance_dual_phase(
 
 
 def clear_pipeline_stage(ctx: SkillContext) -> None:
+    if isinstance(ctx.policy_state.get("pipeline"), dict):
+        from dual_agent.cai.hybrid.feedback import snapshot_pipeline_for_ui
+
+        snapshot_pipeline_for_ui(ctx, get_pipeline_status(ctx))
     ctx.policy_state.pop("pipeline", None)
+
+
+def get_pipeline_status_or_last(ctx: SkillContext) -> dict[str, Any]:
+    status = get_pipeline_status(ctx)
+    if status.get("flow"):
+        return status
+    last = ctx.policy_state.get("pipeline_last")
+    if isinstance(last, dict) and last.get("flow"):
+        return dict(last)
+    return status
 
 
 def build_step_list(flow: PipelineFlow, current_stage: str) -> list[dict[str, str]]:
@@ -361,6 +398,7 @@ def get_pipeline_status(ctx: SkillContext) -> dict[str, Any]:
             "nodes": [],
             "current_node_id": "",
             "current_index": -1,
+            "thinking": {"entries": []},
         }
     flow = str(raw.get("flow") or "")
     if flow not in ("chat", "review"):
@@ -385,4 +423,14 @@ def get_pipeline_status(ctx: SkillContext) -> dict[str, Any]:
         "nodes": nodes,
         "current_node_id": current_node_id,
         "current_index": idx,
+        "thinking": {"entries": _thinking_entries_for_ctx(ctx)},
     }
+
+
+def _thinking_entries_for_ctx(ctx: SkillContext) -> list[dict[str, Any]]:
+    try:
+        from dual_agent.cai.hybrid.feedback import build_thinking_entries
+
+        return build_thinking_entries(ctx)
+    except Exception:  # noqa: BLE001
+        return []

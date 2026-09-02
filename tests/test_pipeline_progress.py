@@ -11,13 +11,13 @@ from dual_agent.cai.pipeline_progress import (
 from dual_agent.skill_types import SkillContext
 
 
-def test_build_step_list_execute_is_active_index_3() -> None:
+def test_build_step_list_execute_is_active_index_5() -> None:
     steps = build_step_list("chat", "execute")
-    assert len(steps) == 5
-    assert steps[3]["id"] == "execute"
-    assert steps[3]["status"] == "active"
+    assert len(steps) == 7
+    assert steps[5]["id"] == "execute"
+    assert steps[5]["status"] == "active"
     assert steps[0]["status"] == "done"
-    assert steps[4]["status"] == "pending"
+    assert steps[6]["status"] == "pending"
 
 
 def test_get_pipeline_status_empty() -> None:
@@ -26,6 +26,7 @@ def test_get_pipeline_status_empty() -> None:
     assert st["label_zh"] == "準備中…"
     assert st["current_index"] == -1
     assert st["nodes"] == []
+    assert st["thinking"]["entries"] == []
 
 
 def test_set_pipeline_detail() -> None:
@@ -42,12 +43,13 @@ def test_set_pipeline_detail() -> None:
     assert ids.index("dai_plan") < ids.index("replan_llm")
 
 
-def test_chat_init_has_five_base_nodes() -> None:
+def test_chat_init_has_six_base_nodes() -> None:
     ctx = SkillContext(user_input="")
     init_pipeline_run(ctx, "chat")
     st = get_pipeline_status(ctx)
-    assert len(st["nodes"]) == 5
+    assert len(st["nodes"]) == 6
     assert st["nodes"][0]["id"] == "ingress"
+    assert st["nodes"][1]["id"] == "message_features"
 
 
 def test_review_init_includes_dai_dag() -> None:
@@ -80,4 +82,4 @@ def test_splice_dai_only_once() -> None:
     splice_dai_nodes(ctx)
     n2 = len(get_pipeline_status(ctx)["nodes"])
     assert n1 == n2
-    assert n1 == 5 + 5  # chat 5 + dai_plan + dual_flow(4)
+    assert n1 == 6 + 5  # chat 6 + dai_plan + dual_flow(4)

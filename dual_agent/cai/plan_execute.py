@@ -25,6 +25,13 @@ from dual_agent.config import (
 )
 from dual_agent.cai.executor import execute_step, format_results_for_display
 from dual_agent.cai.context_layer import normalize_user_facts
+from dual_agent.cai.hybrid.feedback import (
+    append_observation,
+    finalize_turn_trace,
+    init_turn_trace,
+    record_message_features,
+    record_planner_todos,
+)
 from dual_agent.cai.hybrid.gates import allowed_skills_for, filter_tool_catalog
 from dual_agent.cai.hybrid.message_features import invoke_message_features
 from dual_agent.cai.hybrid.recall import try_recall_relation_shortcut
@@ -293,6 +300,11 @@ def _format_answer_from_dai(dai: dict[str, Any]) -> str:
 
 
 
+def _finalize_outcome(ctx: SkillContext, out: PlanExecuteOutcome) -> PlanExecuteOutcome:
+    finalize_turn_trace(ctx, final_answer=out.answer or "")
+    return out
+
+
 def _outcome_from_direct_answer(
     answer: str,
     *,
@@ -558,6 +570,7 @@ def _run_replan_loop(
                     f"--- 第 {len(observation_lines) + 1} 次執行：{st.skill} ---\n"
                     + format_results_for_display([r])
                 )
+                append_observation(ctx, observation_lines[-1])
                 observation_log = "\n\n".join(observation_lines)
                 todos = todos[1:]
                 continue
@@ -581,6 +594,10 @@ def _run_replan_loop(
             observation_lines.append(
                 f"--- 第 {len(observation_lines) + 1} 次執行：{st.skill} ---\n"
                 + format_results_for_display([r])
+            )
+            append_observation(
+                ctx,
+                observation_lines[-1],
             )
             observation_log = "\n\n".join(observation_lines)
             todos = todos[1:]
@@ -774,6 +791,7 @@ def run_plan_and_execute(
 ) -> PlanExecuteOutcome:
     ctx = ctx or SkillContext(user_input=user_text)
     ctx.user_input = user_text
+    init_turn_trace(ctx)
     if context_pack:
         ctx.policy_state["context_pack"] = (context_pack or "").strip()
     origin = guard_source or "chat_box"
@@ -828,11 +846,12 @@ def run_plan_and_execute(
             pipeline_ctx=ctx,
         )
         ctx.policy_state["message_features"] = features.model_dump()
+        record_message_features(ctx, features)
         recalled = try_recall_relation_shortcut(features, ctx=ctx)
         if recalled is not None:
-            return recalled
+            return _finalize_outcome(ctx, recalled)
         if features.primary_goal == "out_of_scope":
-            return _outcome_from_direct_answer(_OUT_SCOPE_ANSWER)
+            return _finalize_outcome(ctx, _outcome_from_direct_answer(_OUT_SCOPE_ANSWER))
 
     # Memory LLM 短路（Hybrid 啟用時略過，改由 NLP + profile skill 處理）
     pending_mem = ctx.policy_state.get("pending_memory_confirm")
@@ -925,6 +944,7 @@ def run_plan_and_execute(
     task_type = task_type_v
     task_state = task_state_v
     po_message = msg_v
+    record_planner_todos(ctx, initial_plan)
 
     if bool(ctx.policy_state.get("pending_review")):
         art = (ingress.artifact_text or "").strip()
@@ -944,19 +964,22 @@ def run_plan_and_execute(
     results: list[SkillResult] = []
     executed_trace: list[PlanStep] = []
 
-    return _run_replan_loop(
-        normalized_turn=normalized_turn,
-        task_type=task_type,
-        task_state=task_state,
-        initial_plan=initial_plan,
-        todos=todos,
-        po_message=po_message,
-        ctx=ctx,
-        results=results,
-        executed_trace=executed_trace,
-        model=model,
-        base_url=base_url,
-        temperature=temperature,
-        context_pack=context_pack,
-        active_pending_review=active_pending_review,
+    return _finalize_outcome(
+        ctx,
+        _run_replan_loop(
+            normalized_turn=normalized_turn,
+            task_type=task_type,
+            task_state=task_state,
+            initial_plan=initial_plan,
+            todos=todos,
+            po_message=po_message,
+            ctx=ctx,
+            results=results,
+            executed_trace=executed_trace,
+            model=model,
+            base_url=base_url,
+            temperature=temperature,
+            context_pack=context_pack,
+            active_pending_review=active_pending_review,
+        ),
     )

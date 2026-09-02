@@ -1,7 +1,7 @@
 # ScamSentinel CAI Hybrid 重構計畫
 
 > 最後更新：2026-09-02  
-> 狀態：H1 已完成（259 pytest 全綠）；H2 反饋與 H3 Mobile UX 待開始  
+> 狀態：H1–H3 已完成（259+ pytest 全綠）；H2 反饋與 H3 Mobile thinking 已落地  
 > 遠端：https://github.com/jayterry/Dual-agent.git
 
 本文件為 **唯一** Hybrid 架構計畫書；原先分散的 Prompt 初稿、欄位規劃、Context 分層等文件已併入此處，程式中的 prompt 正文見 `dual_agent/cai/hybrid/prompts/`。
@@ -203,24 +203,25 @@ dual_agent/cai/
 | `plan_execute` 接入 Hybrid | ✅ |
 | `react_replan.py` + ReAct 單步 action | ✅ |
 | `replan_llm.py` 改 ReAct（廢 `updated_todos`） | ✅ 已接入（Hybrid 時走 `react_replan.py`） |
-| `result_fusion.py` | ⏳（H2 前可選） |
-| pytest 全綠 | ✅ 259 passed, 1 skipped |
+| `result_fusion.py` | ✅ |
+| pytest 全綠 | ✅ 261+ passed |
 
 ### Phase H2 — 全局反饋
 
 | 項目 | 狀態 |
 |------|------|
-| `feedback.py` + TurnTrace | ⏳ |
-| `problem_report_runner` 新增 `message_features` scenario | ⏳ |
-| 重寫 `agent_full_coverage` 對齊五階段 | ⏳ |
+| `feedback.py` + TurnTrace | ✅ |
+| `result_fusion.py` | ✅ |
+| `problem_report_runner` 新增 `message_features` scenario | ✅ |
+| 重寫 `agent_full_coverage` 對齊五階段 | ✅ |
 
 ### Phase H3 — Mobile UX
 
 | 項目 | 狀態 |
 |------|------|
-| `thinking.entries` 面板 | ⏳ |
-| `GET /pipeline` 回傳 thinking | ⏳ |
-| smsagent `ThinkingProcessPanel` | ⏳ |
+| `thinking.entries` 面板 | ✅ |
+| `GET /pipeline` 回傳 thinking | ✅ |
+| smsagent `ThinkingProcessPanel` | ✅ |
 
 ### Track B — ML（平行）
 

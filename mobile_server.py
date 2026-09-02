@@ -34,7 +34,7 @@ from dual_agent.cai.context_layer import (
 from dual_agent.cai.executor import format_results_for_display
 from dual_agent.cai.pipeline_progress import (
     clear_pipeline_stage,
-    get_pipeline_status,
+    get_pipeline_status_or_last,
     init_pipeline_run,
     set_pipeline_stage,
 )
@@ -427,7 +427,7 @@ def session_pipeline(session_id: str, _: None = Depends(_require_token)) -> dict
     if not sid:
         raise HTTPException(status_code=400, detail="session_id 必填")
     ent = _get_session(sid)
-    return get_pipeline_status(ent.ctx)
+    return get_pipeline_status_or_last(ent.ctx)
 
 
 @app.post("/v1/review")
