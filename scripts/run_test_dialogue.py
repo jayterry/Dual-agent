@@ -20,7 +20,6 @@ from dual_agent.cai.planner_validate import validate_planner_output
 from dual_agent.cai.schemas import PlanStep, PlannerOutput, ReplanOutput
 from dual_agent.cai.context_layer import normalize_user_facts
 from dual_agent.cai.memory_direct import try_handle_memory_turn
-from dual_agent.cai.semantic_router import apply_semantic_router, route_user_text
 from dual_agent.ingress import normalize_ingress
 from dual_agent.skill_types import SkillContext
 from scripts.problem_report_runner import (
@@ -350,47 +349,20 @@ def run_ingress_dialogue(scenario: dict[str, Any], turn: dict[str, Any]) -> dict
 
 
 def run_semantic_router_dialogue(scenario: dict[str, Any], turn: dict[str, Any]) -> dict[str, Any]:
+    """semantic_router 已退役；回傳略過列。"""
     sid = str(scenario.get("id", ""))
     user_text = str(turn["user"])
-    expect = dict(turn.get("expect") or {})
-    issues: list[str] = []
-    if turn.get("apply_over_planner"):
-        wrong = [_plan_step(t) for t in turn["apply_over_planner"]]
-        todos, tt, ts, applied = apply_semantic_router(
-            user_text=user_text,
-            todos=wrong,
-            task_type="action",
-            task_state="running",
-            ingress_requires_dai=False,
-            ingress_detected_task_type="action",
-        )
-        if expect.get("router_applied") and not applied:
-            issues.append("router 應覆寫 planner")
-        got = _skills(todos)
-        plan = " → ".join(got) if got else "（空）"
-        task_type = tt
-        task_state = ts
-    else:
-        routed = route_user_text(user_text)
-        got = _skills(routed.todos)
-        if "confidence" in expect and routed.confidence != str(expect["confidence"]):
-            issues.append(f"confidence 預期 {expect['confidence']}")
-        if "skills" in expect and got != list(expect["skills"]):
-            issues.append(f"skills 預期 {expect['skills']} 實際 {got}")
-        plan = " → ".join(got) if got else "（空）"
-        task_type = routed.task_type
-        task_state = routed.task_state
     return _turn_row(
         scenario_id=sid,
         group=str(turn.get("group") or "unit"),
         ref=str(turn.get("ref") or "semantic_router"),
         user=user_text,
-        task_type=task_type,
-        task_state=task_state,
-        plan=plan,
+        task_type="—",
+        task_state="—",
+        plan="（已廢止）",
         answer="—",
         pending_review="—",
-        ok="✓" if not issues else "✗ " + "；".join(issues),
+        ok="⊘ 略過",
     )
 
 

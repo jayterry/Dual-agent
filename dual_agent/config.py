@@ -34,6 +34,19 @@ def cai_ingress_model() -> str:
     return cai_memory_model()
 
 
+def cai_message_features_model() -> str:
+    """Hybrid NLP MessageFeatures 模型；預設 qwen2.5:3b。"""
+    explicit = os.environ.get("CAI_MESSAGE_FEATURES_MODEL", "").strip()
+    if explicit:
+        return explicit
+    return cai_ingress_model()
+
+
+def hybrid_enabled() -> bool:
+    raw = _env("CAI_HYBRID_ENABLED", "true").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 def ingress_router_enabled() -> bool:
     raw = _env("CAI_INGRESS_ROUTER_ENABLED", "true").strip().lower()
     return raw not in ("0", "false", "no", "off")

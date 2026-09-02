@@ -6,11 +6,13 @@ import os
 from typing import Any
 
 from dual_agent.dai.executor import build_pipeline_context
-from dual_agent.dai.pipeline_context import SMS_REVIEW_DAG
+from dual_agent.dai.pipeline_context import LEGACY_SMS_REVIEW_DAG
 from dual_agent.dai.schemas import DAIRequest
 from dual_agent.dai.skills._pipeline_steps import STEP_HANDLERS
 
-FEATURE_DAG_STEPS: tuple[str, ...] = tuple(s for s in SMS_REVIEW_DAG if s != "fuse_risk_and_ueba")
+FEATURE_DAG_STEPS: tuple[str, ...] = tuple(
+    s for s in LEGACY_SMS_REVIEW_DAG if s != "fuse_risk_and_ueba"
+)
 
 
 def replay_feature_context(

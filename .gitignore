@@ -33,3 +33,8 @@ data/risk_models/**/*
 !data/risk_models/.gitkeep
 data/risk_models/**/eval_plots/
 data/semantic_router_batch_report.json
+
+# 本機執行產物
+data/user_profile.sqlite
+test_reports/
+data/risk_training/labels_llm_bank_dryrun.jsonl

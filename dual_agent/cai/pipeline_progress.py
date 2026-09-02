@@ -62,10 +62,10 @@ _DAI_LLM_STEPS: frozenset[str] = frozenset(
 _SKILL_LABELS: dict[str, str] = {
     "call_dai": "風險分析",
     "ask_user": "詢問使用者",
-    "search_web": "網路搜尋",
-    "open_url_readonly": "開啟網頁",
-    "fetch_url": "抓取網頁",
-    "weather": "天氣查詢",
+    "profile_remember_relation": "記住關係",
+    "profile_forget_relation": "忘記關係",
+    "profile_recall_relation": "回想關係",
+    "confirm": "確認",
     "memory_recall": "記憶回想",
     "noop": "略過",
 }

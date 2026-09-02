@@ -58,7 +58,7 @@ def test_review_request_without_artifact_short_circuits_before_planner() -> None
     assert len(out.plan) == 1
     assert out.plan[0].skill == "ask_user"
     assert out.results == []
-    assert "請貼上完整簡訊內容" in out.answer
+    assert "請貼上完整簡訊" in out.answer
     assert ctx.policy_state.get("pending_review")
 
 

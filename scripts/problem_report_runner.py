@@ -17,7 +17,6 @@ from dual_agent.cai.plan_execute import run_plan_and_execute
 from dual_agent.cai.planner_validate import validate_planner_output
 from dual_agent.cai.review_entry_eligibility import looks_like_review_intent_without_artifact
 from dual_agent.cai.schemas import PlanStep, PlannerOutput, ReplanOutput
-from dual_agent.cai.semantic_router import apply_semantic_router, route_user_text
 from dual_agent.cai.context_layer import normalize_user_facts
 from dual_agent.cai.memory_direct import try_handle_memory_turn
 from dual_agent.ingress import normalize_ingress
@@ -308,32 +307,9 @@ def _run_semantic_router_scenario(
     scenario: dict[str, Any],
     default_severity: str,
 ) -> None:
+    """semantic_router 已退役（Hybrid NLP）；略過舊 scenario。"""
     sid = str(scenario["id"])
-    for turn in scenario.get("turns") or []:
-        user_text = str(turn["user"])
-        expect = dict(turn.get("expect") or {})
-        severity = str(turn.get("severity_on_fail") or scenario.get("severity_on_fail") or default_severity)
-        routed = route_user_text(user_text)
-        if "confidence" in expect and routed.confidence != str(expect["confidence"]):
-            result.add(sid, user_text, severity, f"confidence 應為 {expect['confidence']}；實際 {routed.confidence}")
-        if "skills" in expect and _skills(routed.todos) != list(expect["skills"]):
-            result.add(sid, user_text, severity, f"router skills 應為 {expect['skills']}；實際 {_skills(routed.todos)}")
-        if "task_type" in expect and routed.task_type != str(expect["task_type"]):
-            result.add(sid, user_text, severity, f"router task_type 應為 {expect['task_type']}；實際 {routed.task_type}")
-        if turn.get("apply_over_planner"):
-            wrong = [_plan_step(t) for t in turn["apply_over_planner"]]
-            todos, _, _, applied = apply_semantic_router(
-                user_text=user_text,
-                todos=wrong,
-                task_type="action",
-                task_state="running",
-                ingress_requires_dai=False,
-                ingress_detected_task_type="action",
-            )
-            if expect.get("router_applied") and not applied:
-                result.add(sid, user_text, severity, "apply_semantic_router 應覆寫 planner")
-            if "skills" in expect and _skills(todos) != list(expect["skills"]):
-                result.add(sid, user_text, severity, f"apply 後 skills 應為 {expect['skills']}；實際 {_skills(todos)}")
+    result.add(sid, "", "warn", "semantic_router scenario 已廢止（Hybrid 架構）")
 
 
 def _run_plan_execute_multiturn(

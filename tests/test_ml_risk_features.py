@@ -48,8 +48,9 @@ def test_replay_without_semantic() -> None:
         prev = os.environ.get("DAI_SEMANTIC_LLM")
         os.environ["DAI_SEMANTIC_LLM"] = "0"
         try:
-            pipe = replay_feature_context("請驗證網銀密碼", with_semantic=False)
-            assert pipe.r_rules >= 80
+            text = "請立即驗證您的網路銀行密碼並回傳"
+            pipe = replay_feature_context(text, with_semantic=False)
+            assert pipe.r_rules >= 80, f"r_rules={pipe.r_rules}"
             assert int(pipe.component_scores.get("r_llm_optional") or 0) == 0
         finally:
             if prev is None:

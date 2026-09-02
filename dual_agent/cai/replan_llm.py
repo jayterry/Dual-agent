@@ -13,7 +13,16 @@ from dual_agent.llm_json import coerce_llm_bool, coerce_llm_text, invoke_and_par
 from dual_agent.cai.planner_context import post_process_replan_todos
 from dual_agent.cai.pipeline_progress import advance_pipeline_node
 from dual_agent.cai.schemas import PlanStep, ReplanOutput
+from dual_agent.config import hybrid_enabled
 from dual_agent.skill_types import SkillContext
+
+try:
+    from dual_agent.cai.hybrid.react_replan import invoke_react_replan, react_to_replan_output
+    from dual_agent.cai.hybrid.schemas import MessageFeatures
+except ImportError:  # pragma: no cover
+    invoke_react_replan = None  # type: ignore[assignment,misc]
+    react_to_replan_output = None  # type: ignore[assignment,misc]
+    MessageFeatures = None  # type: ignore[assignment,misc]
 
 
 def invoke_replan(
@@ -31,6 +40,36 @@ def invoke_replan(
     pending_review: bool = False,
     pipeline_ctx: SkillContext | None = None,
 ) -> ReplanOutput:
+    if hybrid_enabled() and invoke_react_replan is not None and react_to_replan_output is not None:
+        features: MessageFeatures | None = None
+        if pipeline_ctx is not None:
+            raw = pipeline_ctx.policy_state.get("message_features")
+            if isinstance(raw, dict):
+                try:
+                    features = MessageFeatures.model_validate(raw)
+                except Exception:
+                    features = None
+        react_out = invoke_react_replan(
+            user_text=user_text,
+            task_type=task_type,
+            task_state=task_state,
+            remaining_todos=remaining_todos,
+            observation_log=observation_log,
+            planner_message=planner_message,
+            model=model,
+            base_url=base_url,
+            temperature=temperature,
+            context_pack=context_pack,
+            message_features=features,
+            pending_review=pending_review,
+            pipeline_ctx=pipeline_ctx,
+        )
+        return react_to_replan_output(
+            react_out,
+            features=features,
+            fallback_task_state=task_state,
+        )
+
     if pipeline_ctx is not None:
         advance_pipeline_node(pipeline_ctx, "replan_llm", model=model)
     llm = ChatOllama(model=model, base_url=base_url, temperature=temperature)

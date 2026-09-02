@@ -18,12 +18,18 @@ from dual_agent.config import (
     OLLAMA_BASE_URL,
     OLLAMA_MODEL,
     cai_memory_model,
+    cai_message_features_model,
+    hybrid_enabled,
     max_executor_steps,
     max_replan_iterations,
 )
 from dual_agent.cai.executor import execute_step, format_results_for_display
 from dual_agent.cai.context_layer import normalize_user_facts
-from dual_agent.cai.follow_up_direct import is_pure_identity_turn, try_follow_up_direct_answer
+from dual_agent.cai.hybrid.gates import allowed_skills_for, filter_tool_catalog
+from dual_agent.cai.hybrid.message_features import invoke_message_features
+from dual_agent.cai.hybrid.recall import try_recall_relation_shortcut
+from dual_agent.cai.hybrid.schemas import MessageFeatures
+from dual_agent.cai.hybrid.validate import validate_planner_from_features
 from dual_agent.cai.memory_direct import try_handle_memory_turn
 from dual_agent.cai.pipeline_progress import clear_pipeline_stage, set_pipeline_stage
 from dual_agent.cai.planner_llm import invoke_planner
@@ -47,8 +53,9 @@ from dual_agent.ingress import (
 from dual_agent.skill_types import SkillContext, SkillResult
 from dual_agent.skills_registry import get_tool_catalog_cai, parse_inline_skill_calls, strip_inline_skill_calls
 
-_REVIEW_ASK_USER_QUESTION = "請貼上完整簡訊內容，我才能幫你審查風險。"
-_REVIEW_ASK_USER_ANSWER = "請貼上完整簡訊內容，我才能幫你審查風險。"
+_OUT_SCOPE_ANSWER = "我主要協助檢視可疑訊息與詐騙風險，請貼上完整內容。"
+_REVIEW_ASK_USER_QUESTION = "請貼上完整簡訊或訊息內容，我才能幫您審查風險。"
+_REVIEW_ASK_USER_ANSWER = _REVIEW_ASK_USER_QUESTION
 
 
 def _out_plan(initial: list[PlanStep], executed: list[PlanStep]) -> list[PlanStep]:
@@ -284,24 +291,6 @@ def _format_answer_from_dai(dai: dict[str, Any]) -> str:
             lines.extend(f"• {x}" for x in picked)
     return "\n".join(lines).strip() or "已完成風險審查。"
 
-
-def _try_direct_follow_up_answer(
-    user_text: str,
-    ctx: SkillContext,
-    *,
-    context_pack: str | None,
-) -> str | None:
-    """身份／送審後追問等確定性回答（優先於 Planner/Replan）。"""
-    profile = ctx.policy_state.get("user_profile")
-    if not isinstance(profile, dict):
-        profile = None
-    return try_follow_up_direct_answer(
-        user_text,
-        context_pack=context_pack,
-        user_profile=profile,
-        task_snapshot=_task_snapshot_from_ctx(ctx),
-        review_work_state=ctx.policy_state.get("review_work_state"),
-    )
 
 
 def _outcome_from_direct_answer(
@@ -821,7 +810,31 @@ def run_plan_and_execute(
     if _should_direct_review_ask_user(ingress):
         return _direct_review_ask_user(ctx, ingress)
 
-    # Memory：僅在非防詐路徑，或已有待確認記名時執行（避免劫持送審）
+    features: MessageFeatures | None = None
+    if hybrid_enabled():
+        pending_mem = ctx.policy_state.get("pending_memory_confirm")
+        has_pending_mem = isinstance(pending_mem, dict) and bool(pending_mem.get("value"))
+        set_pipeline_stage(ctx, flow="chat", stage="message_features", model=cai_message_features_model())
+        features = invoke_message_features(
+            user_text=normalized_turn,
+            context_pack=context_pack,
+            input_origin=origin,
+            artifact_from_api=(ingress.artifact_text or artifact or "").strip() or None,
+            body_source="api_split" if artifact else ("sms_share" if origin == "sms_share" else "inline"),
+            pending_review=had_pending_review,
+            pending_memory_confirm=has_pending_mem,
+            task_snapshot=snap,
+            base_url=base_url,
+            pipeline_ctx=ctx,
+        )
+        ctx.policy_state["message_features"] = features.model_dump()
+        recalled = try_recall_relation_shortcut(features, ctx=ctx)
+        if recalled is not None:
+            return recalled
+        if features.primary_goal == "out_of_scope":
+            return _outcome_from_direct_answer(_OUT_SCOPE_ANSWER)
+
+    # Memory LLM 短路（Hybrid 啟用時略過，改由 NLP + profile skill 處理）
     pending_mem = ctx.policy_state.get("pending_memory_confirm")
     has_pending_mem = isinstance(pending_mem, dict) and bool(pending_mem.get("value"))
     itt = str(getattr(ingress, "detected_task_type", "") or "").strip().lower()
@@ -832,8 +845,8 @@ def run_plan_and_execute(
         for tok in ("房產", "匯款", "轉帳", "驗證碼", "點擊連結", "投資", "詐騙", "準備好")
     ) and any(tok in normalized_turn for tok in ("發訊息", "傳訊息", "簡訊", "跟我說", "叫我"))
 
-    allow_memory = has_pending_mem or (
-        not fraud_or_review and not fraud_narrative
+    allow_memory = (not hybrid_enabled()) and (
+        has_pending_mem or (not fraud_or_review and not fraud_narrative)
     )
     if allow_memory:
         set_pipeline_stage(ctx, flow="chat", stage="memory", model=cai_memory_model())
@@ -854,21 +867,20 @@ def run_plan_and_execute(
     else:
         set_pipeline_stage(ctx, flow="chat", stage="memory_skipped")
 
-    if is_pure_identity_turn(normalized_turn):
-        direct = _try_direct_follow_up_answer(normalized_turn, ctx, context_pack=context_pack)
-        if direct:
-            return _outcome_from_direct_answer(direct)
-
     payload = _planner_payload(user_text, ctx)
 
     set_pipeline_stage(ctx, flow="chat", stage="planner", model=model)
     ingress_requires_dai = bool(ingress.requires_dai)
     review_pending_candidate = bool((ingress.metadata or {}).get("review_pending_candidate"))
+    tool_catalog = get_tool_catalog_cai()
+    if features is not None:
+        tool_catalog = filter_tool_catalog(tool_catalog, features)
+    allowed = allowed_skills_for(features) if features is not None else None
 
     po = invoke_planner(
         user_text=payload,
         source_turn_text=normalized_turn,
-        tool_catalog=get_tool_catalog_cai(),
+        tool_catalog=tool_catalog,
         model=model,
         base_url=base_url,
         temperature=temperature,
@@ -881,26 +893,32 @@ def run_plan_and_execute(
         ingress_requires_dai=ingress_requires_dai,
         review_pending_candidate=review_pending_candidate,
         pipeline_ctx=ctx,
+        message_features=features,
+        allowed_skills=allowed,
     )
-    v_todos, task_type_v, task_state_v, msg_v = validate_planner_output(
-        user_text=normalized_turn,
-        task_type=po.task_type,
-        task_state=po.task_state,
-        todos=list(po.todos),
-        message=po.message,
-        ingress_detected_task_type=str(ingress.detected_task_type),
-        ingress_artifact_text=(ingress.artifact_text or "").strip(),
-        pending_review=had_pending_review,
-        task_snapshot=snap,
-        context_pack=context_pack or "",
-        ingress_requires_dai=ingress_requires_dai,
-        review_pending_candidate=review_pending_candidate,
-    )
-
-    if task_type_v == "direct_response" and not v_todos and is_pure_identity_turn(normalized_turn):
-        direct = _try_direct_follow_up_answer(normalized_turn, ctx, context_pack=context_pack)
-        if direct:
-            return _outcome_from_direct_answer(direct)
+    if features is not None:
+        v_todos, task_type_v, task_state_v, msg_v = validate_planner_from_features(
+            features,
+            task_type=po.task_type,
+            task_state=po.task_state,
+            todos=list(po.todos),
+            message=po.message,
+        )
+    else:
+        v_todos, task_type_v, task_state_v, msg_v = validate_planner_output(
+            user_text=normalized_turn,
+            task_type=po.task_type,
+            task_state=po.task_state,
+            todos=list(po.todos),
+            message=po.message,
+            ingress_detected_task_type=str(ingress.detected_task_type),
+            ingress_artifact_text=(ingress.artifact_text or "").strip(),
+            pending_review=had_pending_review,
+            task_snapshot=snap,
+            context_pack=context_pack or "",
+            ingress_requires_dai=ingress_requires_dai,
+            review_pending_candidate=review_pending_candidate,
+        )
 
     initial_plan = list(v_todos)
     todos: list[PlanStep] = list(v_todos)
@@ -910,7 +928,7 @@ def run_plan_and_execute(
 
     if bool(ctx.policy_state.get("pending_review")):
         art = (ingress.artifact_text or "").strip()
-        pivoted = any(s.skill == "weather" for s in v_todos) and not any(
+        pivoted = features is not None and features.primary_goal == "out_of_scope" and not any(
             s.skill == "ask_user"
             and "簡訊" in str((s.args or {}).get("question", ""))
             for s in v_todos

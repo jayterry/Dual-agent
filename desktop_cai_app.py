@@ -115,6 +115,56 @@ def _user_facing_dai_block(results: list[Any]) -> str:
     return "\n".join(lines).strip()
 
 
+def _build_dai_result_block(results: list[Any]) -> str:
+    """測試／Context 用 DAI 摘要（固定標題格式）。"""
+    dai = _extract_latest_call_dai_payload(results)
+    if not dai:
+        return ""
+    lines = ["【DAI 風險摘要】"]
+    score = dai.get("risk_score")
+    if isinstance(score, (int, float)):
+        lines.append(f"風險分數：{int(score)}/100")
+    action = str(dai.get("recommended_cai_action") or "").strip()
+    if action:
+        lines.append(f"建議動作：{action}")
+    summary = str(dai.get("safety_summary") or "").strip()
+    if summary:
+        lines.append(f"摘要：{summary}")
+    reasons = dai.get("reason_highlights") or dai.get("user_reason_highlights") or []
+    if isinstance(reasons, list) and reasons:
+        lines.append("主要原因：")
+        for r in reasons[:6]:
+            lines.append(f"- {r}")
+    display = str(dai.get("display_text") or "").strip()
+    if display and len(lines) <= 1:
+        lines.append(display[:800])
+    return "\n".join(lines).strip()
+
+
+def _build_plan_block(plan: list[Any]) -> str:
+    steps = list(plan or [])
+    lines = [f"計畫步驟數：{len(steps)}"]
+    for i, st in enumerate(steps, start=1):
+        skill = str(getattr(st, "skill", "") or "")
+        args = dict(getattr(st, "args", {}) or {})
+        if skill == "call_dai" and "context_pack" in args:
+            redacted = dict(args)
+            redacted["context_pack"] = "（已省略）"
+            lines.append(f"{i}. {skill} {redacted}")
+        else:
+            lines.append(f"{i}. {skill} {args}")
+    return "\n".join(lines)
+
+
+def _build_memory_assistant_text(answer: str, results: list[Any]) -> str:
+    """寫入 Session 的 assistant 文字：回答 + DAI 摘要（不含計畫）。"""
+    base = (answer or "").strip()
+    dai = _build_dai_result_block(results)
+    if base and dai:
+        return f"{base}\n\n{dai}"
+    return base or dai
+
+
 def _build_user_facing_reply(answer: str, results: list[Any]) -> str:
     base = (answer or "").strip()
     dai = _user_facing_dai_block(results)

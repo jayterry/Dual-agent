@@ -10,9 +10,10 @@ from dual_agent.skills_registry import SKILLS, get_tool_catalog
 
 
 def test_skills_loaded() -> None:
-    assert "open_url_readonly" in SKILLS or "search_web" in SKILLS
-    assert "run_guard_pipeline" in SKILLS
     assert "call_dai" in SKILLS
+    assert "ask_user" in SKILLS
+    assert "profile_remember_relation" in SKILLS
+    assert "run_guard_pipeline" in SKILLS
     cat = get_tool_catalog()
     assert isinstance(cat, list)
     assert len(cat) >= 1

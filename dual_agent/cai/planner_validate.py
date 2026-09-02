@@ -51,9 +51,12 @@ def _pending_review_followup_should_drop_dai(user_text: str) -> bool:
     t = (user_text or "").strip()
     if not t:
         return False
-    from dual_agent.cai.follow_up_direct import classify_follow_up_question
+    from dual_agent.cai.memory_direct import looks_like_memory_clarification_turn
 
-    if classify_follow_up_question(t) in ("user_identity", "assistant_identity"):
+    c = re.sub(r"\s+", "", t)
+    if re.match(r"^(我是誰|你知道我是誰)[?？!！。…]*$", c):
+        return True
+    if re.match(r"^(你是誰|你又是誰|你叫什麼)[?？!！。…]*$", t, re.IGNORECASE):
         return True
     if meta_assistant_or_chat_scope(t):
         return True

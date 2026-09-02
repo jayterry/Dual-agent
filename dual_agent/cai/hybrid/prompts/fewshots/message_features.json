@@ -1,0 +1,343 @@
+{
+  "version": 1,
+  "description": "NLP MessageFeatures few-shot；由 message_features.py 依場景注入 User 訊息",
+  "examples": [
+    {
+      "id": "fs_review_inline",
+      "tags": [
+        "review_sms",
+        "positive"
+      ],
+      "user_input": "幫我看是不是詐騙：【台新銀行】您的帳戶異常，請立即點擊連結驗證 http://fake-bank.tw",
+      "context_hints": {
+        "input_origin": "chat_box",
+        "artifact_from_api": ""
+      },
+      "output": {
+        "turn_intent": {
+          "primary_goal": "review_sms",
+          "is_follow_up": false,
+          "confidence": 0.94,
+          "intent_rationale_zh": "使用者要求判斷詐騙，且 inline 附有銀行通知正文與連結。"
+        },
+        "content": {
+          "has_reviewable_body": true,
+          "artifact_text": "【台新銀行】您的帳戶異常，請立即點擊連結驗證 http://fake-bank.tw",
+          "user_comment": "幫我看是不是詐騙",
+          "body_source": "inline",
+          "contains_url": true,
+          "contains_phone": false,
+          "contains_financial_terms": true,
+          "scam_signal_tags": [
+            "urgency",
+            "bank_impersonation",
+            "link_phishing"
+          ],
+          "text_length": 72
+        },
+        "social": {
+          "mentions_relation": false,
+          "relation_category": null,
+          "relation_label": null,
+          "relation_name": null,
+          "on_behalf_of_other": false
+        },
+        "gaps": {
+          "missing_body_for_review": false,
+          "needs_profile_relation_confirm": false,
+          "out_of_product_scope": false
+        },
+        "capabilities": {
+          "required_types": [
+            "tool_call"
+          ],
+          "domain_tags": [
+            "safety_review"
+          ],
+          "suggested_skills": [
+            "call_dai"
+          ],
+          "is_multi_step": false
+        }
+      }
+    },
+    {
+      "id": "fs_review_behalf",
+      "tags": [
+        "review_sms",
+        "on_behalf_of_other",
+        "positive"
+      ],
+      "user_input": "我媽收到這則，幫我看是不是詐騙：【台新銀行】您的帳戶異常，請立即點擊連結驗證…",
+      "context_hints": {
+        "input_origin": "chat_box",
+        "artifact_from_api": ""
+      },
+      "output": {
+        "turn_intent": {
+          "primary_goal": "review_sms",
+          "is_follow_up": false,
+          "confidence": 0.92,
+          "intent_rationale_zh": "代媽媽詢問是否詐騙，已附可疑簡訊正文，屬送審而非回想關係。"
+        },
+        "content": {
+          "has_reviewable_body": true,
+          "artifact_text": "【台新銀行】您的帳戶異常，請立即點擊連結驗證…",
+          "user_comment": "我媽收到這則，幫我看是不是詐騙",
+          "body_source": "inline",
+          "contains_url": true,
+          "contains_phone": false,
+          "contains_financial_terms": true,
+          "scam_signal_tags": [
+            "urgency",
+            "bank_impersonation",
+            "link_phishing"
+          ],
+          "text_length": 68
+        },
+        "social": {
+          "mentions_relation": true,
+          "relation_category": "親戚",
+          "relation_label": "媽媽",
+          "relation_name": null,
+          "on_behalf_of_other": true
+        },
+        "gaps": {
+          "missing_body_for_review": false,
+          "needs_profile_relation_confirm": false,
+          "out_of_product_scope": false
+        },
+        "capabilities": {
+          "required_types": [
+            "tool_call"
+          ],
+          "domain_tags": [
+            "safety_review"
+          ],
+          "suggested_skills": [
+            "call_dai"
+          ],
+          "is_multi_step": false
+        }
+      }
+    },
+    {
+      "id": "fs_missing_body",
+      "tags": [
+        "ask_missing_body",
+        "negative"
+      ],
+      "user_input": "這是不是詐騙？",
+      "context_hints": {
+        "input_origin": "chat_box",
+        "artifact_from_api": ""
+      },
+      "output": {
+        "turn_intent": {
+          "primary_goal": "ask_missing_body",
+          "is_follow_up": false,
+          "confidence": 0.88,
+          "intent_rationale_zh": "使用者想審可疑訊息，但未提供可送審正文。"
+        },
+        "content": {
+          "has_reviewable_body": false,
+          "artifact_text": null,
+          "user_comment": "這是不是詐騙？",
+          "body_source": "inline",
+          "contains_url": false,
+          "contains_phone": false,
+          "contains_financial_terms": false,
+          "scam_signal_tags": [],
+          "text_length": 7
+        },
+        "social": {
+          "mentions_relation": false,
+          "relation_category": null,
+          "relation_label": null,
+          "relation_name": null,
+          "on_behalf_of_other": false
+        },
+        "gaps": {
+          "missing_body_for_review": true,
+          "needs_profile_relation_confirm": false,
+          "out_of_product_scope": false
+        },
+        "capabilities": {
+          "required_types": [
+            "user_interaction"
+          ],
+          "domain_tags": [
+            "ask_missing_artifact"
+          ],
+          "suggested_skills": [
+            "ask_user"
+          ],
+          "is_multi_step": false
+        }
+      }
+    },
+    {
+      "id": "fs_out_scope",
+      "tags": [
+        "out_of_scope",
+        "negative"
+      ],
+      "user_input": "做 it 有很多方面你猜猜我是做什麼的",
+      "context_hints": {
+        "input_origin": "chat_box",
+        "artifact_from_api": ""
+      },
+      "output": {
+        "turn_intent": {
+          "primary_goal": "out_of_scope",
+          "is_follow_up": false,
+          "confidence": 0.91,
+          "intent_rationale_zh": "猜職業閒聊，非防詐送審或關係記憶，超出產品範圍。"
+        },
+        "content": {
+          "has_reviewable_body": false,
+          "artifact_text": null,
+          "user_comment": "做 it 有很多方面你猜猜我是做什麼的",
+          "body_source": "inline",
+          "contains_url": false,
+          "contains_phone": false,
+          "contains_financial_terms": false,
+          "scam_signal_tags": [],
+          "text_length": 22
+        },
+        "social": {
+          "mentions_relation": false,
+          "relation_category": null,
+          "relation_label": null,
+          "relation_name": null,
+          "on_behalf_of_other": false
+        },
+        "gaps": {
+          "missing_body_for_review": false,
+          "needs_profile_relation_confirm": false,
+          "out_of_product_scope": true
+        },
+        "capabilities": {
+          "required_types": [
+            "direct_response"
+          ],
+          "domain_tags": [
+            "out_of_scope"
+          ],
+          "suggested_skills": [],
+          "is_multi_step": false
+        }
+      }
+    },
+    {
+      "id": "fs_recall",
+      "tags": [
+        "recall_relation",
+        "positive"
+      ],
+      "user_input": "我媽媽叫什麼",
+      "context_hints": {
+        "input_origin": "chat_box",
+        "artifact_from_api": ""
+      },
+      "output": {
+        "turn_intent": {
+          "primary_goal": "recall_relation",
+          "is_follow_up": false,
+          "confidence": 0.93,
+          "intent_rationale_zh": "使用者詢問已記錄的關係人姓名，屬回想而非送審。"
+        },
+        "content": {
+          "has_reviewable_body": false,
+          "artifact_text": null,
+          "user_comment": "我媽媽叫什麼",
+          "body_source": "inline",
+          "contains_url": false,
+          "contains_phone": false,
+          "contains_financial_terms": false,
+          "scam_signal_tags": [],
+          "text_length": 6
+        },
+        "social": {
+          "mentions_relation": true,
+          "relation_category": "親戚",
+          "relation_label": "媽媽",
+          "relation_name": null,
+          "on_behalf_of_other": false
+        },
+        "gaps": {
+          "missing_body_for_review": false,
+          "needs_profile_relation_confirm": false,
+          "out_of_product_scope": false
+        },
+        "capabilities": {
+          "required_types": [
+            "long_term_memory"
+          ],
+          "domain_tags": [
+            "relation_memory"
+          ],
+          "suggested_skills": [
+            "profile_recall_relation"
+          ],
+          "is_multi_step": false
+        }
+      }
+    },
+    {
+      "id": "fs_remember",
+      "tags": [
+        "remember_relation",
+        "positive"
+      ],
+      "user_input": "我媽媽叫 Yuri",
+      "context_hints": {
+        "input_origin": "chat_box",
+        "artifact_from_api": ""
+      },
+      "output": {
+        "turn_intent": {
+          "primary_goal": "remember_relation",
+          "is_follow_up": false,
+          "confidence": 0.95,
+          "intent_rationale_zh": "使用者陳述媽媽姓名，屬記住關係而非送審或回想。"
+        },
+        "content": {
+          "has_reviewable_body": false,
+          "artifact_text": null,
+          "user_comment": "我媽媽叫 Yuri",
+          "body_source": "inline",
+          "contains_url": false,
+          "contains_phone": false,
+          "contains_financial_terms": false,
+          "scam_signal_tags": [],
+          "text_length": 10
+        },
+        "social": {
+          "mentions_relation": true,
+          "relation_category": "親戚",
+          "relation_label": "媽媽",
+          "relation_name": "Yuri",
+          "on_behalf_of_other": false
+        },
+        "gaps": {
+          "missing_body_for_review": false,
+          "needs_profile_relation_confirm": false,
+          "out_of_product_scope": false
+        },
+        "capabilities": {
+          "required_types": [
+            "long_term_memory"
+          ],
+          "domain_tags": [
+            "relation_memory"
+          ],
+          "suggested_skills": [
+            "profile_remember_relation"
+          ],
+          "is_multi_step": false
+        }
+      }
+    }
+  ]
+}

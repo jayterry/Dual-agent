@@ -21,11 +21,19 @@ from dual_agent.cai.planner_context import (
     strip_planner_system_prefix,
 )
 from dual_agent.cai.planner_validate import validate_planner_output
-from dual_agent.cai.semantic_router import apply_semantic_router
 from dual_agent.cai.pipeline_progress import advance_pipeline_node
 from dual_agent.cai.schemas import PlanStep, PlannerOutput
 from dual_agent.skill_types import SkillContext
 from dual_agent.cai.task_taxonomy import normalize_task_type
+
+try:
+    from dual_agent.cai.hybrid.prompts import load_prompt
+    from dual_agent.cai.hybrid.schemas import MessageFeatures
+    from dual_agent.cai.hybrid.validate import validate_planner_from_features
+except ImportError:  # pragma: no cover
+    MessageFeatures = None  # type: ignore[misc, assignment]
+    load_prompt = None  # type: ignore[assignment]
+    validate_planner_from_features = None  # type: ignore[assignment]
 
 
 def _sanitize_and_collapse_search_steps(todos: list[PlanStep]) -> list[PlanStep]:
@@ -58,6 +66,88 @@ def _planner_open_site_fallback(user_text: str) -> PlannerOutput | None:
     )
 
 
+def _invoke_planner_hybrid(
+    *,
+    user_text: str,
+    source_turn_text: str | None,
+    tool_catalog: list[dict[str, Any]],
+    model: str,
+    base_url: str,
+    temperature: float,
+    context_pack: str | None,
+    message_features: MessageFeatures,
+    allowed_skills: list[str] | None,
+    pipeline_ctx: SkillContext | None,
+) -> PlannerOutput:
+    llm = ChatOllama(model=model, base_url=base_url, temperature=temperature)
+    catalog_json = json.dumps(tool_catalog, ensure_ascii=False)
+    allowed_json = json.dumps(allowed_skills or [], ensure_ascii=False)
+    mf_json = message_features.model_dump_json(exclude_none=True)
+    system = load_prompt("planner_system") if load_prompt else ""
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system),
+            (
+                "human",
+                """【MessageFeatures JSON】
+{message_features_json}
+
+【本輪允許 skills】
+{allowed_skills_json}
+
+【Context Pack】
+{context_pack}
+
+【本輪使用者原句】
+{source_turn}
+
+【Planner 輸入（含銜接）】
+{user}
+
+【可用技能 catalog】
+{tool_catalog_json}""",
+            ),
+        ]
+    )
+    source_turn_display = (source_turn_text or "").strip() or strip_planner_system_prefix(user_text.strip())
+    chain = prompt | llm | StrOutputParser()
+    inputs = {
+        "message_features_json": mf_json,
+        "allowed_skills_json": allowed_json,
+        "context_pack": (context_pack or "").strip() or "（無）",
+        "source_turn": source_turn_display or "（無）",
+        "user": user_text.strip(),
+        "tool_catalog_json": catalog_json,
+    }
+
+    def _invoke() -> str:
+        return chain.invoke(inputs)
+
+    obj = invoke_and_parse_json(_invoke)
+    task_type = normalize_task_type(coerce_llm_text(obj.get("task_type")))
+    task_state = coerce_llm_text(obj.get("task_state")).lower() or "planning"
+    todos_raw = obj.get("todos") or []
+    todos: list[PlanStep] = []
+    if isinstance(todos_raw, list):
+        for item in todos_raw:
+            if not isinstance(item, dict):
+                continue
+            sk = coerce_llm_text(item.get("skill")).lower()
+            args = item.get("args") or {}
+            if sk and isinstance(args, dict):
+                todos.append(PlanStep(skill=sk, args={str(k): v for k, v in args.items()}))
+    message = coerce_llm_text(obj.get("message"))
+    if validate_planner_from_features is not None:
+        todos, task_type, task_state, message = validate_planner_from_features(
+            message_features,
+            task_type=task_type,
+            task_state=task_state,
+            todos=todos,
+            message=message,
+        )
+    return PlannerOutput(task_type=task_type, task_state=task_state, todos=todos, message=message)
+
+
 def invoke_planner(
     *,
     user_text: str,
@@ -75,7 +165,24 @@ def invoke_planner(
     ingress_requires_dai: bool = False,
     review_pending_candidate: bool = False,
     pipeline_ctx: SkillContext | None = None,
+    message_features: MessageFeatures | None = None,
+    allowed_skills: list[str] | None = None,
 ) -> PlannerOutput:
+    if message_features is not None and load_prompt is not None:
+        if pipeline_ctx is not None:
+            advance_pipeline_node(pipeline_ctx, "planner_llm", model=model)
+        return _invoke_planner_hybrid(
+            user_text=user_text,
+            source_turn_text=source_turn_text,
+            tool_catalog=tool_catalog,
+            model=model,
+            base_url=base_url,
+            temperature=temperature,
+            context_pack=context_pack,
+            message_features=message_features,
+            allowed_skills=allowed_skills,
+            pipeline_ctx=pipeline_ctx,
+        )
     if pipeline_ctx is not None:
         advance_pipeline_node(pipeline_ctx, "planner_llm", model=model)
     llm = ChatOllama(model=model, base_url=base_url, temperature=temperature)
@@ -259,26 +366,17 @@ task_type 必須為以下之一：**direct_response** | **action** | **check** |
         ingress_requires_dai=ingress_requires_dai,
         review_pending_candidate=review_pending_candidate,
     )
-    todos, task_type, task_state, router_applied = apply_semantic_router(
+    todos, task_type, task_state = apply_open_site_guard(
         user_text=intent,
         todos=todos,
         task_type=task_type,
         task_state=task_state,
-        ingress_requires_dai=ingress_requires_dai,
-        ingress_detected_task_type=ingress_detected_task_type,
     )
-    if not router_applied:
-        todos, task_type, task_state = apply_open_site_guard(
-            user_text=intent,
-            todos=todos,
-            task_type=task_type,
-            task_state=task_state,
-        )
-        todos, task_type, task_state = apply_explicit_search_guard(
-            user_text=intent,
-            context_pack=context_pack,
-            todos=todos,
-            task_type=task_type,
-            task_state=task_state,
-        )
+    todos, task_type, task_state = apply_explicit_search_guard(
+        user_text=intent,
+        context_pack=context_pack,
+        todos=todos,
+        task_type=task_type,
+        task_state=task_state,
+    )
     return PlannerOutput(task_type=task_type, task_state=task_state, todos=todos, message=message)
