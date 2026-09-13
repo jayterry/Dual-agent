@@ -493,8 +493,15 @@ def format_work_state_summary(task_snapshot: dict[str, Any] | None) -> str:
     snap = dict(task_snapshot or {})
     if not snap:
         return ""
-    phase = str(snap.get("review_phase") or "").strip() or "（未送審）"
-    lines = [f"階段：{phase}"]
+    from dual_agent.cai.work_record import format_work_record_for_prompt
+
+    lines: list[str] = []
+    work_block = format_work_record_for_prompt(snap)
+    if work_block:
+        lines.append(work_block)
+    phase = str(snap.get("review_phase") or "").strip()
+    if phase:
+        lines.append(f"審查階段：{phase}")
     score = snap.get("last_risk_score")
     if isinstance(score, (int, float)):
         lines.append(f"上次風險分數：{int(score)}/100")
@@ -512,6 +519,10 @@ def format_work_state_summary(task_snapshot: dict[str, Any] | None) -> str:
             "若本輪 user prompt 僅詢問分數／身份／來源，通常 todos=[]、勿 call_dai；"
             "若本輪附全新可疑正文或使用者要求再審，可 call_dai。"
         )
+    lines.append(
+        "next_action 為待辦描述而非執行授權；插問（aside）不改變進度，"
+        "僅在資料齊備且本輪意圖允許時才推進。"
+    )
     return "\n".join(lines)
 
 
@@ -712,10 +723,11 @@ def record_turn(
             result_summary=(result_summary or "").strip(),
         )
     )
-    session.task_snapshot = {
-        "task_type": (task_type or "").strip(),
-        "task_state": (task_state or "").strip(),
-    }
+    # 只更新 task_type/state；不得用空 snapshot 覆蓋 work／review 進度欄位
+    prev = dict(session.task_snapshot or {})
+    prev["task_type"] = (task_type or "").strip()
+    prev["task_state"] = (task_state or "").strip()
+    session.task_snapshot = prev
     while len(session.recent_buffer) > cap:
         oldest = session.recent_buffer.pop(0)
         try:
@@ -760,27 +772,19 @@ def record_turn_after_review(
         plan_summary=plan_summary,
         result_summary=result_summary,
     )
+    from dual_agent.cai.work_record import on_dai_success
+
     art = (artifact or "").strip()
-    dai_payload = dict(dai or {})
-    snap: dict[str, Any] = {
-        "task_type": (task_type or "check").strip(),
-        "task_state": (task_state or "completed").strip(),
-        "review_phase": "review_completed",
-        "has_dai_result": True,
-        "message_source": (message_source or "").strip() or "unknown",
-        "input_origin": (input_origin or "").strip() or "unknown",
-        "artifact_key": _norm_artifact_key(art),
-        "artifact_excerpt": _truncate(art, 400),
-    }
-    score = dai_payload.get("risk_score")
-    if isinstance(score, (int, float)):
-        snap["last_risk_score"] = int(score)
-    summ = str(dai_payload.get("safety_summary") or "").strip()
-    if summ:
-        snap["last_safety_summary"] = _truncate(summ, 500)
-    action = str(dai_payload.get("recommended_cai_action") or "").strip()
-    if action:
-        snap["last_recommended_action"] = action
+    snap = on_dai_success(
+        session.task_snapshot,
+        dai=dai,
+        artifact=art,
+        message_source=message_source,
+        input_origin=input_origin,
+        turn_relation="continue",
+    )
+    snap["task_type"] = (task_type or "check").strip()
+    snap["task_state"] = (task_state or "completed").strip()
     session.task_snapshot = snap
     return snap
 

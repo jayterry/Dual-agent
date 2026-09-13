@@ -105,12 +105,12 @@ def test_invoke_dai_sms_review_mock() -> None:
         "risk_score_total_user_fused": 72,
     }
     fake_plan = DefensePlan(
-        risk_score=0,
+        risk_score=100,
         risk_labels=[],
         safety_summary="計畫摘要",
         evidence=[],
         tool_restrictions={},
-        recommended_cai_action="continue",
+        recommended_cai_action="block",
         defense_todos=[DefenseStep(skill="guard_scan", args={})],
     )
     fake_obs = [

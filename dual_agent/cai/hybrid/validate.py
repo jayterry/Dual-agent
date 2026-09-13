@@ -7,7 +7,6 @@ from dual_agent.cai.hybrid.schemas import MessageFeatures
 from dual_agent.cai.schemas import PlanStep
 
 _REVIEW_ASK = "請貼上完整簡訊或訊息內容，我才能幫您審查風險。"
-_OUT_SCOPE_MSG = "我主要協助檢視可疑訊息與詐騙風險，請貼上完整內容。"
 
 
 def validate_planner_from_features(
@@ -22,8 +21,19 @@ def validate_planner_from_features(
     allowed = set(allowed_skills_for(features))
     filtered = [s for s in todos if (s.skill or "").strip().lower() in allowed]
 
-    if goal == "out_of_scope":
-        return [], "direct_response", "completed", message or _OUT_SCOPE_MSG
+    if goal in ("out_of_scope", "assistant_chat"):
+        from dual_agent.cai.skills.quick_reply.handler import resolve_kind
+
+        existing = [s for s in filtered if (s.skill or "").strip().lower() == "quick_reply"]
+        if existing:
+            return existing[:1], "direct_response", "completed", message
+        kind = resolve_kind({}, features)
+        return (
+            [PlanStep(skill="quick_reply", args={"kind": kind})],
+            "direct_response",
+            "completed",
+            message,
+        )
 
     if goal == "ask_missing_body" or features.gaps.missing_body_for_review:
         if not filtered:

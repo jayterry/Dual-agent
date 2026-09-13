@@ -7,18 +7,21 @@ from pathlib import Path
 import torch
 
 from dual_agent.dai.fraud_dual.gnn.graph import ContextGraph
-from dual_agent.dai.fraud_dual.gnn.hetero_model import DEFAULT_HETERO_PATH, HeteroContextNet, sample_to_hetero
+from dual_agent.dai.fraud_dual.gnn.hetero_model import HeteroContextNet, sample_to_hetero
+from dual_agent.dai.fraud_dual.paths import resolve_hetero_model_path
 from dual_agent.dai.fraud_dual.gnn.rules import ContextPrediction
 from dual_agent.dai.fraud_dual.ml.dataset import ContextSample
 
 
 class HeteroGNNScorer:
     def __init__(self, model_path: Path | str | None = None):
-        path = Path(model_path or DEFAULT_HETERO_PATH)
-        if not path.exists():
+        resolved = Path(model_path) if model_path else resolve_hetero_model_path()
+        if resolved is None or not resolved.exists():
             raise FileNotFoundError(
-                f"HeteroGNN not found: {path}. Run: python -m scripts.train_hetero"
+                f"HeteroGNN not found: {model_path or 'ranking_full / context_hetero.pt'}. "
+                "Run: python -m scripts.train_hetero"
             )
+        path = resolved
         blob = torch.load(path, map_location="cpu", weights_only=False)
         self.model = HeteroContextNet(blob["in_dims"], hidden=blob.get("hidden", 64))
         self.model.load_state_dict(blob["state_dict"])

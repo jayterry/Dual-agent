@@ -140,6 +140,10 @@ _THREAT_TERMS = (
     "要匯款",
     "要付款",
     "殺",
+    "kill",
+    "threaten",
+    "kidnap",
+    "ransom",
     "小孩被綁架",
 )
 _THREAT_BODY_MARKERS = (

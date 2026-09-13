@@ -73,7 +73,9 @@ def test_otp_path_a_warn_or_block() -> None:
             int(report["path_a"]["context_score_100"]),
         )
         assert int(report["risk_score"]) == gate
-        assert "Path A" in (report.get("display_text") or "")
+        assert "訊息線索" in (report.get("display_text") or "")
+        assert report["path_a"].get("threat_clues") is not None
+        assert report["path_a"].get("context_backend")
     finally:
         _restore_env(prev)
 
@@ -81,7 +83,20 @@ def test_otp_path_a_warn_or_block() -> None:
 def test_score01_to_100() -> None:
     assert score01_to_100(0.7726) == 77
     assert score01_to_100(1.2) == 100
+    assert score01_to_100(20) == 20
     assert score01_to_100(-1) == 0
+
+
+def test_path_b_percent_threat_not_clipped_to_100() -> None:
+    from dual_agent.dai.fraud_dual.llm.parse import parse_result_b
+
+    rb = parse_result_b(
+        '{"llm_threat": 20, "llm_scam_type": "Fake_CS",'
+        ' "llm_context": 35, "llm_channel_familiar": false,'
+        ' "explanation": "語氣催促。"}'
+    )
+    assert score01_to_100(rb.llm_threat) == 20
+    assert score01_to_100(rb.llm_context) == 35
 
 
 def test_relation_heuristic_official() -> None:

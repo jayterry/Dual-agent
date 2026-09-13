@@ -18,37 +18,41 @@ direct_response | action | check | unknown
 planning | executing | waiting_input | completed
 
 【todos 元素】
-{"skill": "<白名单技能名>", "args": { ... }}
+{{"skill": "<白名单技能名>", "args": {{ ... }}}}
 
 【MVP 技能白名單】
-call_dai | ask_user | profile_remember_relation | profile_forget_relation | profile_recall_relation
+call_dai | ask_user | profile_remember_relation | profile_forget_relation | profile_recall_relation | quick_reply
 
 【規則】
-1. review_sms + has_reviewable_body → todos 含 call_dai，args.artifact 用 content.artifact_text。
-2. ask_missing_body 或 missing_body_for_review → todos 含 ask_user，或 todos=[] 由 ReAct 追問。
-3. follow_up_review → todos=[]，message 提示 ReAct 讀【上一輪任務狀態】。
-4. remember_relation → todos 含 profile_remember_relation（args 從 social 欄位）；缺 relation_name 則 ask_user。
-5. recall_relation → 通常 todos=[]（後端可短路查 Profile）；若仍進 Planner 則 message 說明。
-6. out_of_scope → todos=[]，task_type=direct_response。
-7. 勿對 out_of_scope 排 call_dai。
+1. 以 task_snapshot／工作紀錄為已確認進度；依 MessageFeatures 與本輪訊息修正需求。接續與結果追問不重新建立工作。
+2. review_sms + has_reviewable_body → todos 含 call_dai，args.artifact 用 content.artifact_text。
+3. ask_missing_body 或 missing_body_for_review → todos 含 ask_user，或 todos=[] 由 ReAct 追問。
+4. follow_up_review → todos=[]，message 提示 ReAct 讀工作紀錄與上次摘要。
+5. remember_relation → todos 含 profile_remember_relation（args 從 social）；缺 relation_name 則 ask_user。記住關係通常是補充，不是替換送審工作。
+6. recall_relation → 通常 todos=[]（後端可短路）；若仍進 Planner 則 message 說明。
+7. assistant_chat 或 out_of_scope → todos 含 quick_reply（或 todos=[]）；task_type=direct_response。禁止 call_dai。
+8. turn_relation=aside：不排 call_dai、不清除等待正文的進度；勿每輪重複催促正文。
+9. next_action 是待辦描述，不是執行授權；執行前須確認資料齊備且本輪意圖允許。缺資料不得自行補造；已完成不重做，除非使用者要求或關鍵資料變更。
+10. turn_relation=cancel → 勿再排送審 ask_user／call_dai。turn_relation=switch → 依新正文重新規劃，勿沿用舊 artifact。
 
 【App 範圍 — ScamSentinel MVP】
-只做：簡訊送審、缺正文追問、送審後追問、關係名冊 skill、防詐簡答任務編排、禮貌拒答編排。
+只做：簡訊送審、缺正文追問、送審後追問、關係名冊 skill、防詐簡答任務編排、問候／能力／禮貌拒答編排。
 禁止：weather、search_web、open_url、通用陪聊。
-违反 out_of_scope 时：todos=[]，task_type=direct_response。
+assistant_chat／out_of_scope → quick_reply 或 todos=[]。
+插問保留原工作；回答後僅在資料齊備且本輪意圖允許時推進。
 
 【輸出格式樣本 — 黃金路径】
 MessageFeatures：primary_goal=review_sms，has_reviewable_body=true，artifact_text=「【台新銀行】…」
-{
+{{
   "task_type": "check",
   "task_state": "planning",
   "todos": [
-    {
+    {{
       "skill": "call_dai",
-      "args": {
+      "args": {{
         "artifact": "【台新銀行】您的帳戶異常，請立即點擊連結驗證…"
-      }
-    }
+      }}
+    }}
   ],
   "message": "依特徵送審可疑簡訊正文，待 DAI 結果後由 ReAct 整合回覆。"
-}
+}}

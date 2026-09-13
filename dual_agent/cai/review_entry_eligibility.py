@@ -282,31 +282,28 @@ def should_abandon_pending_review(
     *,
     ingress_artifact_text: str = "",
     pending_review: bool = False,
+    turn_relation: str | None = None,
 ) -> bool:
     """
-    待審中是否應放棄送審、改走新任務或 direct_response。
-    供 plan_execute / validate 在 LLM 規劃前後同步狀態與底線校正。
+    待審中是否應放棄送審。
+
+    僅在明確取消時為 True（looks_like_review_declined 或 NLP turn_relation=cancel）。
+    天氣、地名、短肯定、工作指令、範圍外／插問皆不得因此取消送審。
     """
     if not pending_review:
         return False
     if (ingress_artifact_text or "").strip():
         return False
+    rel = (turn_relation or "").strip().lower()
+    if rel == "cancel":
+        return True
+    if rel in ("aside", "continue", "clarify", "correct", "switch"):
+        # switch 由上層 start_work 處理，不走 abandon
+        return False
     t = (raw or "").strip()
     if not t:
         return False
-    if looks_like_review_declined(t):
-        return True
-    if looks_like_short_affirmative_pivot(t):
-        return True
-    if looks_like_location_for_weather(t):
-        return True
-    if len(t) <= 48 and _WEATHER_RE.search(t):
-        return True
-    from dual_agent.ingress import extract_entities
-
-    if looks_like_action_workflow(t, extract_entities(t)):
-        return True
-    return False
+    return looks_like_review_declined(t)
 
 
 def artifact_meta_only_for_dai(artifact_text: str) -> bool:

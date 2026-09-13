@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -12,10 +12,22 @@ PrimaryGoal = Literal[
     "follow_up_review",
     "remember_relation",
     "recall_relation",
+    "assistant_chat",
     "out_of_scope",
 ]
 
 BodySource = Literal["inline", "api_split", "sms_share"]
+
+TurnRelation = Literal[
+    "continue",
+    "clarify",
+    "correct",
+    "aside",
+    "switch",
+    "cancel",
+]
+
+WorkScope = Literal["in_scope", "out_of_scope"]
 
 
 class TurnIntent(BaseModel):
@@ -23,6 +35,12 @@ class TurnIntent(BaseModel):
     is_follow_up: bool = False
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     intent_rationale_zh: str = ""
+    # 增量：本輪與現行工作的關係／細意圖／範圍（不取代 primary_goal）
+    turn_relation: TurnRelation | None = None
+    intent: str | None = None
+    scope: WorkScope | None = None
+    provided_fields: dict[str, Any] = Field(default_factory=dict)
+    needs_clarification: bool = False
 
 
 class ContentFeatures(BaseModel):
@@ -68,6 +86,10 @@ class MessageFeatures(BaseModel):
     @property
     def primary_goal(self) -> str:
         return self.turn_intent.primary_goal
+
+    @property
+    def turn_relation(self) -> str | None:
+        return self.turn_intent.turn_relation
 
     def model_dump_json_compact(self) -> str:
         return self.model_dump_json(exclude_none=True)

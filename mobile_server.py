@@ -455,6 +455,10 @@ def review(body: ReviewBody, _: None = Depends(_require_token)) -> dict[str, Any
     memory_answer = _build_memory_assistant_text(out.answer, list(out.results or []))
     user_turn = compose_review_user_text(message=body.message, artifact=body.artifact)
     dai = _extract_dai_from_results(list(out.results or []))
+    if isinstance(ent.ctx.policy_state.get("task_snapshot"), dict):
+        merged = dict(ent.memory.task_snapshot or {})
+        merged.update(ent.ctx.policy_state["task_snapshot"])
+        ent.memory.task_snapshot = merged
     record_turn_after_review(
         ent.memory,
         user=user_turn,
@@ -505,6 +509,11 @@ def chat(body: ChatBody, _: None = Depends(_require_token)) -> dict[str, Any]:
     memory_answer = _build_memory_assistant_text(out.answer, list(out.results or []))
     user_turn = compose_review_user_text(message=user_prompt, artifact=artifact) if artifact else user_prompt
     dai = _extract_dai_from_results(list(out.results or []))
+    # plan_execute 寫入的 work record 先帶回 session，再 record_turn（不覆蓋 work 欄）
+    if isinstance(ent.ctx.policy_state.get("task_snapshot"), dict):
+        merged = dict(ent.memory.task_snapshot or {})
+        merged.update(ent.ctx.policy_state["task_snapshot"])
+        ent.memory.task_snapshot = merged
     if dai:
         record_turn_after_review(
             ent.memory,

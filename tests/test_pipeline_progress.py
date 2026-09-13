@@ -83,3 +83,12 @@ def test_splice_dai_only_once() -> None:
     n2 = len(get_pipeline_status(ctx)["nodes"])
     assert n1 == n2
     assert n1 == 6 + 5  # chat 6 + dai_plan + dual_flow(4)
+
+
+def test_thinking_log_starts_empty_until_reasoning() -> None:
+    ctx = SkillContext(user_input="")
+    init_pipeline_run(ctx, "chat")
+    assert get_pipeline_status(ctx)["thinking"]["entries"] == []
+    set_pipeline_stage(ctx, flow="chat", stage="ingress")
+    set_pipeline_stage(ctx, flow="chat", stage="planner")
+    assert get_pipeline_status(ctx)["thinking"]["entries"] == []

@@ -12,10 +12,11 @@ MVP_SKILLS: frozenset[str] = frozenset(
         "profile_forget_relation",
         "profile_recall_relation",
         "confirm",
+        "quick_reply",
     }
 )
 
-_OUT_OF_SCOPE_SKILLS: frozenset[str] = frozenset()
+_OUT_OF_SCOPE_SKILLS: frozenset[str] = frozenset({"quick_reply", "confirm"})
 
 _GOAL_ALLOWED: dict[str, frozenset[str]] = {
     "review_sms": frozenset({"call_dai", "ask_user", "confirm"}),
@@ -23,7 +24,8 @@ _GOAL_ALLOWED: dict[str, frozenset[str]] = {
     "follow_up_review": frozenset({"ask_user", "confirm"}),
     "remember_relation": frozenset({"profile_remember_relation", "ask_user", "confirm"}),
     "recall_relation": frozenset({"profile_recall_relation", "confirm"}),
-    "out_of_scope": frozenset({"confirm"}),
+    "assistant_chat": frozenset({"quick_reply", "confirm"}),
+    "out_of_scope": frozenset({"quick_reply", "confirm"}),
 }
 
 

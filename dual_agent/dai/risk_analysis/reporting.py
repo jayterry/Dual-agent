@@ -42,6 +42,9 @@ def risk_report_to_dai_payload(report: dict[str, Any]) -> dict[str, Any]:
         "path_a": dict(report.get("path_a") or {}) if report.get("path_a") else None,
         "path_b": dict(report.get("path_b") or {}) if report.get("path_b") else None,
         "narrator_text": report.get("narrator_text"),
+        "headline": str(report.get("headline") or ""),
+        "instruction": str(report.get("instruction") or ""),
+        "limitations": list(report.get("limitations") or []),
         "persona": dict(report.get("persona") or {}),
         "relation_inferred": report.get("relation_inferred"),
         "channel_inferred": report.get("channel_inferred"),
@@ -59,7 +62,8 @@ def dai_result_from_sms_defense(
 ) -> DAIResult:
     """簡訊審查：Defense 計畫 + DAG 報告 → DAIResult。"""
     exec_ok = all(o.ok for o in observations) if observations else True
-    risk_score = max(int(plan.risk_score), int(report.get("risk_score") or 0))
+    # 分數以雙路報告為準；Defense 計畫的 risk_score 只是事前猜測，不得抬成 100。
+    risk_score = int(report.get("risk_score") or 0)
     safety = str(report.get("safety_summary") or plan.safety_summary or "").strip()
     if not safety:
         safety = "簡訊審查已完成。" if exec_ok else "簡訊審查執行未完成。"

@@ -46,13 +46,45 @@ def record_message_features(ctx: SkillContext, features: MessageFeatures) -> Non
     raw = _trace_dict(ctx)
     raw["primary_goal"] = features.primary_goal
     raw["message_features"] = features.model_dump()
+    from dual_agent.cai.pipeline_progress import _GOAL_THINKING, append_thinking
+
+    rationale = (features.turn_intent.intent_rationale_zh or "").strip()
+    conclusion = _GOAL_THINKING.get(features.primary_goal, "先理解這句話的意圖。")
+    if rationale and rationale not in conclusion:
+        spoken = f"{rationale.rstrip('。')}。因此{conclusion}"
+    else:
+        spoken = conclusion
+    append_thinking(ctx, "nlp", "理解意圖", spoken)
 
 
-def record_planner_todos(ctx: SkillContext, todos: list[Any]) -> None:
+def record_planner_todos(ctx: SkillContext, todos: list[Any], *, message: str = "") -> None:
     raw = _trace_dict(ctx)
     raw["planner_todos"] = [
         {"skill": s.skill, "args": dict(s.args or {})} for s in todos
     ]
+    from dual_agent.cai.pipeline_progress import _SKILL_LABELS, append_thinking
+
+    names: list[str] = []
+    rationales: list[str] = []
+    for step in todos:
+        skill = str(getattr(step, "skill", "") or "").strip()
+        if skill:
+            names.append(_SKILL_LABELS.get(skill, skill))
+        args = getattr(step, "args", None) or {}
+        if isinstance(args, dict):
+            why = str(args.get("rationale") or "").strip()
+            if why:
+                rationales.append(why)
+    parts: list[str] = []
+    msg = (message or "").strip()
+    if msg and not msg.startswith("（") and "未經 Planner" not in msg:
+        parts.append(msg[:280].rstrip("。") + "。")
+    if rationales:
+        parts.append(rationales[0][:200].rstrip("。") + "。")
+    if names:
+        parts.append("所以這輪要做：" + "、".join(names) + "。")
+    if parts:
+        append_thinking(ctx, "planner", "規劃", "".join(parts))
 
 
 def append_observation(ctx: SkillContext, line: str) -> None:
@@ -83,71 +115,19 @@ def finalize_turn_trace(ctx: SkillContext, *, final_answer: str = "") -> TurnTra
     return trace
 
 
-_GOAL_LABELS: dict[str, str] = {
-    "review_sms": "送審簡訊",
-    "ask_missing_body": "缺正文待補",
-    "follow_up_review": "送審後追問",
-    "remember_relation": "記住關係",
-    "recall_relation": "回想關係",
-    "out_of_scope": "超出範圍",
-}
-
-
 def build_thinking_entries(ctx: SkillContext) -> list[dict[str, Any]]:
-    entries: list[dict[str, Any]] = []
-    mf = ctx.policy_state.get("message_features")
-    if isinstance(mf, dict) and mf:
-        goal = str((mf.get("turn_intent") or {}).get("primary_goal") or "")
-        entries.append(
-            {
-                "kind": "nlp",
-                "label_zh": _GOAL_LABELS.get(goal, "理解意圖"),
-                "detail": mf,
-            }
-        )
-    trace = ctx.policy_state.get("turn_trace")
-    if isinstance(trace, dict):
-        todos = trace.get("planner_todos")
-        if isinstance(todos, list) and todos:
-            entries.append(
-                {
-                    "kind": "planner",
-                    "label_zh": "規劃任務",
-                    "detail": {"todos": todos},
-                }
-            )
-        for obs in trace.get("observations") or []:
-            if obs:
-                entries.append(
-                    {
-                        "kind": "observation",
-                        "label_zh": "執行結果",
-                        "detail": {"text": str(obs)[:2000]},
-                    }
-                )
-    react = ctx.policy_state.get("react_trace")
-    if isinstance(react, list):
-        for i, row in enumerate(react):
-            if not isinstance(row, dict):
-                continue
-            thought = str(row.get("thought") or "").strip()
-            entries.append(
-                {
-                    "kind": "react",
-                    "label_zh": f"推理步驟 {i + 1}",
-                    "detail": row,
-                }
-            )
-    last = ctx.policy_state.get("turn_trace_last")
-    if isinstance(last, dict) and last.get("final_answer"):
-        entries.append(
-            {
-                "kind": "finish",
-                "label_zh": "完成",
-                "detail": {"final_answer": str(last.get("final_answer") or "")[:500]},
-            }
-        )
-    return entries
+    """讀取 append-only thinking_log；不含 finish 總結。"""
+    log = ctx.policy_state.get("thinking_log")
+    if not isinstance(log, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for row in log:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("kind") or "") == "finish":
+            continue
+        out.append(dict(row))
+    return out
 
 
 def snapshot_pipeline_for_ui(ctx: SkillContext, status: dict[str, Any]) -> None:

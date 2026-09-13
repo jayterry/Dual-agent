@@ -69,10 +69,157 @@ _SKILL_LABELS: dict[str, str] = {
     "profile_remember_relation": "記住關係",
     "profile_forget_relation": "忘記關係",
     "profile_recall_relation": "回想關係",
+    "quick_reply": "快速回覆",
     "confirm": "確認",
     "memory_recall": "記憶回想",
     "noop": "略過",
 }
+
+_GOAL_THINKING: dict[str, str] = {
+    "review_sms": "判斷為送審簡訊。",
+    "ask_missing_body": "判斷為缺正文，需要你再補內容。",
+    "follow_up_review": "判斷為送審後的追問。",
+    "remember_relation": "判斷為要記住關係。",
+    "recall_relation": "判斷為要回想關係。",
+    "assistant_chat": "判斷為問候或說明能力，用短回覆即可。",
+    "out_of_scope": "這輪看起來超出送審範圍。",
+}
+
+
+def append_thinking(
+    ctx: SkillContext,
+    kind: str,
+    label_zh: str,
+    text: str = "",
+) -> None:
+    """追加一口語思考行；相鄰完全重複則略過。"""
+    label = (label_zh or "").strip()
+    spoken = (text or "").strip()
+    k = (kind or "stage").strip() or "stage"
+    if not label and not spoken:
+        return
+    log = ctx.policy_state.get("thinking_log")
+    if not isinstance(log, list):
+        log = []
+        ctx.policy_state["thinking_log"] = log
+    entry = {
+        "kind": k,
+        "label_zh": label,
+        "detail": {"text": spoken} if spoken else {},
+    }
+    if log:
+        last = log[-1]
+        if (
+            isinstance(last, dict)
+            and last.get("kind") == entry["kind"]
+            and last.get("label_zh") == entry["label_zh"]
+            and (last.get("detail") or {}) == entry["detail"]
+        ):
+            return
+    log.append(entry)
+
+
+_SCAM_THINKING_ZH: dict[str, str] = {
+    "Fake_CS": "假客服",
+    "Investment": "投資誘導",
+    "Loan": "貸款誘導",
+    "Job": "打工誘導",
+    "Romance": "情感誘導",
+    "Unknown": "",
+}
+
+
+def _usable_reason(raw: Any) -> str:
+    text = str(raw or "").strip()
+    if len(text) < 4:
+        return ""
+    if text.startswith(("heuristic:", "source_fallback:", "llm_")):
+        return ""
+    if text in {"ok", "heuristic:no_match"}:
+        return ""
+    return text.rstrip("。")
+
+
+def append_infer_thinking(
+    ctx: SkillContext | None,
+    *,
+    channel_meta: dict[str, Any] | None = None,
+    relation_meta: dict[str, Any] | None = None,
+) -> None:
+    """推斷完成後寫「為什麼得到這個管道／關係」。"""
+    if ctx is None:
+        return
+    if isinstance(channel_meta, dict):
+        ch = str(channel_meta.get("channel") or "").strip() or "不明"
+        reason = _usable_reason(channel_meta.get("reason")) or _usable_reason(channel_meta.get("note"))
+        if reason:
+            spoken = f"判斷發送管道是 {ch}，因為{reason}。"
+        elif ch in {"", "不明"}:
+            spoken = "管道線索不夠，先不當成特定 App。"
+        else:
+            spoken = f"內文沒有很硬的平台線索，管道先當成 {ch}。"
+        append_thinking(ctx, "infer", "管道", spoken)
+    if isinstance(relation_meta, dict):
+        rel = str(relation_meta.get("relation_type") or "").strip() or "Unknown"
+        reason = _usable_reason(relation_meta.get("reason")) or _usable_reason(relation_meta.get("note"))
+        if reason:
+            spoken = f"判斷來訊關係是 {rel}，因為{reason}。"
+        elif rel == "Unknown":
+            spoken = "看不出熟人／官方身分，關係先當成 Unknown，避免硬猜。"
+        else:
+            spoken = f"關係線索有限，先當成 {rel}。"
+        append_thinking(ctx, "infer", "關係", spoken)
+
+
+def append_path_a_thinking(
+    ctx: SkillContext | None,
+    *,
+    threat100: int,
+    context100: int,
+    scam_type: str = "",
+    clues: list[str] | None = None,
+    factors: list[str] | None = None,
+) -> None:
+    """Path A 分數出來後寫「憑哪些線索得出威脅／情境分」。"""
+    if ctx is None:
+        return
+    clue_s = "、".join(str(x).strip() for x in (clues or []) if str(x).strip())
+    type_zh = _SCAM_THINKING_ZH.get(str(scam_type or ""), "")
+    if clue_s:
+        threat_line = f"話術上看到「{clue_s}」，所以線索分 {int(threat100)}/100"
+    else:
+        threat_line = f"沒抓到很明顯的誘導詞，線索分 {int(threat100)}/100"
+    if type_zh:
+        threat_line += f"，類型偏{type_zh}"
+    append_thinking(ctx, "path_a", "線索", threat_line + "。")
+    factor_s = "；".join(str(x).strip() for x in (factors or []) if str(x).strip())
+    if factor_s:
+        ctx_line = f"對你這組人設／管道來看：{factor_s}。情境分因此是 {int(context100)}/100。"
+    else:
+        ctx_line = f"沒有額外的情境加成，情境分 {int(context100)}/100。"
+    append_thinking(ctx, "path_a", "情境", ctx_line)
+
+
+def append_path_b_thinking(
+    ctx: SkillContext | None,
+    *,
+    explanation: str = "",
+    threat100: int | None = None,
+    context100: int | None = None,
+    skipped_note: str = "",
+) -> None:
+    """Path B LLM 對照後寫它自己的解釋（不是『正在跑 Path B』）。"""
+    if ctx is None:
+        return
+    expl = str(explanation or "").strip()
+    if expl:
+        # 風險卡只顯示 Path A 線索分；此處不附對照分數，避免思考區 20、卡片 100。
+        _ = threat100, context100
+        append_thinking(ctx, "path_b", "語意對照", expl)
+        return
+    note = str(skipped_note or "").strip()
+    if note and "skip" in note.lower():
+        append_thinking(ctx, "path_b", "語意對照", "這輪沒有語言模型對照，只留下規則與模型分數。")
 
 
 def _new_node(
@@ -140,6 +287,7 @@ def _get_pipe(ctx: SkillContext) -> dict[str, Any]:
 def init_pipeline_run(ctx: SkillContext, flow: PipelineFlow) -> None:
     """請求開始時建立本輪流程圖節點列表。"""
     nodes = _review_base_nodes() if flow == "review" else _chat_base_nodes()
+    ctx.policy_state["thinking_log"] = []
     ctx.policy_state["pipeline"] = {
         "flow": flow,
         "stage": "",

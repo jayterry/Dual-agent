@@ -189,6 +189,8 @@ class ResultA(BaseModel):
     scam_type: ScamType
     intent_confidence: Score01
     context_score: Score01
+    context_backend: str = ""
+    context_factors: list[str] = Field(default_factory=list)
 
     @field_validator("scam_type")
     @classmethod

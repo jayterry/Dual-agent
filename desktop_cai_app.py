@@ -54,65 +54,27 @@ def _extract_latest_call_dai_payload(results: list[Any]) -> dict[str, Any] | Non
 
 
 def _user_facing_dai_block(results: list[Any]) -> str:
-    """使用者可見的風險摘要（無內部欄位名堆砌）。"""
+    """使用者可見的風險摘要（雙卡分數＋限制＋口語報告）。"""
     dai = _extract_latest_call_dai_payload(results)
     if not dai:
         return ""
+    from dual_agent.dai.risk_analysis.user_cards import format_user_display
 
-    lines: list[str] = []
-    path_a = dai.get("path_a") if isinstance(dai.get("path_a"), dict) else None
-    path_b = dai.get("path_b") if isinstance(dai.get("path_b"), dict) else None
-
-    score = dai.get("risk_score")
-    verdict = str(dai.get("verdict") or "").strip()
-    if isinstance(score, (int, float)) or verdict:
-        head = "風險評估"
-        if isinstance(score, (int, float)):
-            head += f"：{int(score)}/100"
-        if verdict:
-            head += f"（{verdict}）"
-        lines.append(head)
-
-    if path_a:
-        lines.append("")
-        lines.append("路徑 A（機器分析）")
-        lines.append(
-            f"威脅 {path_a.get('threat_score_100', '—')}/100　"
-            f"情境 {path_a.get('context_score_100', '—')}/100"
-        )
-        if path_a.get("scam_type"):
-            lines.append(f"類型：{path_a.get('scam_type')}")
-        for r in (path_a.get("reasons") or [])[:4]:
-            lines.append(f"· {r}")
-        for w in (path_a.get("warnings") or [])[:2]:
-            lines.append(f"⚠ {w}")
-
-    if path_b and not path_b.get("skipped"):
-        lines.append("")
-        lines.append("路徑 B（語意對照）")
-        lines.append(
-            f"威脅 {path_b.get('threat_score_100', '—')}/100　"
-            f"情境 {path_b.get('context_score_100', '—')}/100"
-        )
-        for r in (path_b.get("reasons") or [])[:3]:
-            lines.append(f"· {r}")
-    elif path_b and path_b.get("skipped"):
-        # 正式介面：略過細節，不噴 stack／host
-        pass
-
-    narrator = str(dai.get("narrator_text") or "").strip()
-    if narrator:
-        lines.append("")
-        lines.append(narrator[:400])
-    else:
-        summary = str(dai.get("safety_summary") or "").strip()
-        if summary and not path_a:
-            lines.append(summary[:300])
-
-    if not lines:
-        display = str(dai.get("display_text") or "").strip()
-        return display[:800] if display else ""
-    return "\n".join(lines).strip()
+    path_a = dai.get("path_a") if isinstance(dai.get("path_a"), dict) else {}
+    headline = str(dai.get("headline") or "").strip()
+    instruction = str(dai.get("instruction") or "").strip()
+    return format_user_display(
+        headline=headline,
+        instruction=instruction,
+        threat_score_100=int(path_a.get("threat_score_100") or 0),
+        context_score_100=int(path_a.get("context_score_100") or 0),
+        threat_clues=list(path_a.get("threat_clues") or dai.get("user_reason_highlights") or []),
+        context_factors=list(path_a.get("context_factors") or []),
+        context_backend=str(path_a.get("context_backend") or ""),
+        limitations=list(dai.get("limitations") or []),
+        narrator=str(dai.get("narrator_text") or "").strip() or None,
+        suggestions=list(dai.get("user_suggestions") or []),
+    )
 
 
 def _build_dai_result_block(results: list[Any]) -> str:
@@ -573,17 +535,44 @@ def main() -> None:
                 "answer": face[:200],
             }
             q.put(("assistant", face, meta))
-            record_turn(
-                session,
-                user=user_message,
-                assistant=memory_answer,
-                task_type=out.task_type,
-                task_state=out.task_state,
-                model=OLLAMA_MODEL,
-                base_url=OLLAMA_BASE_URL,
-                plan_summary=build_plan_summary(out.plan),
-                result_summary=result_summary,
-            )
+            dai_payload = None
+            for r in out.results or []:
+                if getattr(r, "skill", "") == "call_dai" and isinstance(getattr(r, "data", None), dict):
+                    dai_payload = (r.data or {}).get("dai")
+                    if isinstance(dai_payload, dict):
+                        break
+            # 先把 plan_execute 寫入的 work record 帶回 session，再 record_turn（不覆蓋 work 欄）
+            if isinstance(ctx.policy_state.get("task_snapshot"), dict):
+                session.task_snapshot = dict(ctx.policy_state["task_snapshot"])
+            if isinstance(dai_payload, dict) and dai_payload:
+                from dual_agent.cai.context_layer import record_turn_after_review
+
+                record_turn_after_review(
+                    session,
+                    user=user_message,
+                    assistant=memory_answer,
+                    task_type=out.task_type,
+                    task_state=out.task_state,
+                    model=OLLAMA_MODEL,
+                    base_url=OLLAMA_BASE_URL,
+                    plan_summary=build_plan_summary(out.plan),
+                    result_summary=result_summary,
+                    artifact=str((ctx.policy_state.get("ingress_payload") or {}).get("artifact_text") or ""),
+                    dai=dai_payload,
+                )
+            else:
+                record_turn(
+                    session,
+                    user=user_message,
+                    assistant=memory_answer,
+                    task_type=out.task_type,
+                    task_state=out.task_state,
+                    model=OLLAMA_MODEL,
+                    base_url=OLLAMA_BASE_URL,
+                    plan_summary=build_plan_summary(out.plan),
+                    result_summary=result_summary,
+                )
+            ctx.policy_state["task_snapshot"] = dict(session.task_snapshot or {})
         except Exception as e:  # noqa: BLE001
             log.exception("run_plan_and_execute 失敗")
             q.put(("assistant", "抱歉，處理時發生問題，請稍後再試。", meta))

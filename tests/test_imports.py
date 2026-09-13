@@ -13,6 +13,7 @@ def test_skills_loaded() -> None:
     assert "call_dai" in SKILLS
     assert "ask_user" in SKILLS
     assert "profile_remember_relation" in SKILLS
+    assert "quick_reply" in SKILLS
     assert "run_guard_pipeline" in SKILLS
     cat = get_tool_catalog()
     assert isinstance(cat, list)

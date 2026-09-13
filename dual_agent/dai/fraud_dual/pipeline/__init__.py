@@ -54,7 +54,12 @@ def run_pipeline(request: AnalyzeRequest) -> AnalyzeResponse:
 
     graph, ctx = score_context(shared, writeback, backend="auto")
 
-    result_a = assemble_result_a(threat, ctx.context_score)
+    result_a = assemble_result_a(
+        threat,
+        ctx.context_score,
+        backend=ctx.backend,
+        factors=list(ctx.factors or []),
+    )
 
 
 

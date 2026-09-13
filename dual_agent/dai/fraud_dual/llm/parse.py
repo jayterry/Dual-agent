@@ -72,6 +72,12 @@ def _clip01(v: Any, name: str) -> float:
 
         raise ValueError(f"{name} must be number, got {v!r}") from e
 
+    # LLM 常輸出 0–100（例如 20）而非 0–1；直接 clip 會變成 1.0＝100 分。
+
+    if x > 1.0:
+
+        x = x / 100.0
+
     return max(0.0, min(1.0, x))
 
 

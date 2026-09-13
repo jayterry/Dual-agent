@@ -1,4 +1,4 @@
-"""pending_review 放棄待審：偵測與管線整合（沙盒回歸）。"""
+"""pending_review 放棄待審：僅明確取消；天氣／插問不結束工作。"""
 
 from __future__ import annotations
 
@@ -31,6 +31,12 @@ def test_looks_like_short_affirmative_and_location() -> None:
 def test_should_abandon_requires_pending_context() -> None:
     assert not should_abandon_pending_review("我沒有要你看簡訊", pending_review=False)
     assert should_abandon_pending_review("我沒有要你看簡訊", pending_review=True)
+
+
+def test_should_not_abandon_on_weather_or_pivot() -> None:
+    assert not should_abandon_pending_review("台中市", pending_review=True)
+    assert not should_abandon_pending_review("今天天氣如何", pending_review=True)
+    assert not should_abandon_pending_review("可以", pending_review=True)
 
 
 def test_validate_decline_under_pending_review() -> None:

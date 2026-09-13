@@ -12,12 +12,13 @@ from langchain_ollama import ChatOllama
 from dual_agent.cai.hybrid.gates import allowed_skills_for, skill_allowed
 from dual_agent.cai.hybrid.prompts import load_prompt
 from dual_agent.cai.hybrid.schemas import MessageFeatures, ReActAction, ReActOutput
-from dual_agent.cai.pipeline_progress import advance_pipeline_node
+from dual_agent.cai.skills.quick_reply.handler import KIND_OUT_OF_SCOPE, render_reply
+from dual_agent.cai.pipeline_progress import advance_pipeline_node, append_thinking
 from dual_agent.cai.schemas import PlanStep, ReplanOutput
 from dual_agent.llm_json import coerce_llm_text, invoke_and_parse_json
 from dual_agent.skill_types import SkillContext
 
-_OUT_SCOPE_REPLY = "我主要協助檢視可疑訊息與詐騙風險，請貼上完整內容。"
+_OUT_SCOPE_REPLY = render_reply(KIND_OUT_OF_SCOPE)
 
 
 def _parse_react_action(raw: dict[str, Any]) -> ReActAction:
@@ -117,7 +118,7 @@ def invoke_react_replan(
     if pipeline_ctx is not None:
         advance_pipeline_node(pipeline_ctx, "replan_llm", model=model)
     llm = ChatOllama(model=model, base_url=base_url, temperature=temperature)
-    system = load_prompt("react_replan_system.txt")
+    system = load_prompt("react_replan_system")
     feats = message_features
     if allowed_skills is None and feats is not None:
         allowed_skills = allowed_skills_for(feats)
@@ -201,4 +202,7 @@ observation_log：
         trace = pipeline_ctx.policy_state.setdefault("react_trace", [])
         if isinstance(trace, list):
             trace.append({"thought": out.thought, "action": out.action.model_dump()})
+        thought = (out.thought or "").strip()
+        if thought:
+            append_thinking(pipeline_ctx, "react", "為什麼這樣做", thought)
     return out

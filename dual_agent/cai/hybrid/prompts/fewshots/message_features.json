@@ -224,7 +224,9 @@
           "domain_tags": [
             "out_of_scope"
           ],
-          "suggested_skills": [],
+          "suggested_skills": [
+            "quick_reply"
+          ],
           "is_multi_step": false
         }
       }
@@ -335,6 +337,282 @@
           "suggested_skills": [
             "profile_remember_relation"
           ],
+          "is_multi_step": false
+        }
+      }
+    },
+    {
+      "id": "fs_greet",
+      "tags": ["assistant_chat", "greet"],
+      "user_input": "您好",
+      "context_hints": {
+        "input_origin": "chat_box",
+        "artifact_from_api": ""
+      },
+      "output": {
+        "turn_intent": {
+          "primary_goal": "assistant_chat",
+          "is_follow_up": false,
+          "confidence": 0.96,
+          "intent_rationale_zh": "單純問候，沒有待審正文，屬助理短回覆而非送審。"
+        },
+        "content": {
+          "has_reviewable_body": false,
+          "artifact_text": null,
+          "user_comment": "您好",
+          "body_source": "inline",
+          "contains_url": false,
+          "contains_phone": false,
+          "contains_financial_terms": false,
+          "scam_signal_tags": [],
+          "text_length": 2
+        },
+        "social": {
+          "mentions_relation": false,
+          "relation_category": null,
+          "relation_label": null,
+          "relation_name": null,
+          "on_behalf_of_other": false
+        },
+        "gaps": {
+          "missing_body_for_review": false,
+          "needs_profile_relation_confirm": false,
+          "out_of_product_scope": false
+        },
+        "capabilities": {
+          "required_types": ["direct_response"],
+          "domain_tags": ["greet"],
+          "suggested_skills": ["quick_reply"],
+          "is_multi_step": false
+        }
+      }
+    },
+    {
+      "id": "fs_thanks",
+      "tags": ["assistant_chat", "thanks"],
+      "user_input": "謝謝你",
+      "context_hints": {
+        "input_origin": "chat_box",
+        "artifact_from_api": ""
+      },
+      "output": {
+        "turn_intent": {
+          "primary_goal": "assistant_chat",
+          "is_follow_up": false,
+          "confidence": 0.95,
+          "intent_rationale_zh": "道謝結束對話，無需工具。"
+        },
+        "content": {
+          "has_reviewable_body": false,
+          "artifact_text": null,
+          "user_comment": "謝謝你",
+          "body_source": "inline",
+          "contains_url": false,
+          "contains_phone": false,
+          "contains_financial_terms": false,
+          "scam_signal_tags": [],
+          "text_length": 3
+        },
+        "social": {
+          "mentions_relation": false,
+          "relation_category": null,
+          "relation_label": null,
+          "relation_name": null,
+          "on_behalf_of_other": false
+        },
+        "gaps": {
+          "missing_body_for_review": false,
+          "needs_profile_relation_confirm": false,
+          "out_of_product_scope": false
+        },
+        "capabilities": {
+          "required_types": ["direct_response"],
+          "domain_tags": ["thanks"],
+          "suggested_skills": ["quick_reply"],
+          "is_multi_step": false
+        }
+      }
+    },
+    {
+      "id": "fs_capability",
+      "tags": ["assistant_chat", "capability"],
+      "user_input": "你可以做什麼",
+      "context_hints": {
+        "input_origin": "chat_box",
+        "artifact_from_api": ""
+      },
+      "output": {
+        "turn_intent": {
+          "primary_goal": "assistant_chat",
+          "is_follow_up": false,
+          "confidence": 0.94,
+          "intent_rationale_zh": "詢問助理能力，用短說明即可，不是送審。"
+        },
+        "content": {
+          "has_reviewable_body": false,
+          "artifact_text": null,
+          "user_comment": "你可以做什麼",
+          "body_source": "inline",
+          "contains_url": false,
+          "contains_phone": false,
+          "contains_financial_terms": false,
+          "scam_signal_tags": [],
+          "text_length": 6
+        },
+        "social": {
+          "mentions_relation": false,
+          "relation_category": null,
+          "relation_label": null,
+          "relation_name": null,
+          "on_behalf_of_other": false
+        },
+        "gaps": {
+          "missing_body_for_review": false,
+          "needs_profile_relation_confirm": false,
+          "out_of_product_scope": false
+        },
+        "capabilities": {
+          "required_types": ["direct_response"],
+          "domain_tags": ["capability"],
+          "suggested_skills": ["quick_reply"],
+          "is_multi_step": false
+        }
+      }
+    },
+    {
+      "id": "fs_identity_assistant",
+      "tags": ["assistant_chat", "identity"],
+      "user_input": "你好，你是誰",
+      "context_hints": {
+        "input_origin": "chat_box",
+        "artifact_from_api": ""
+      },
+      "output": {
+        "turn_intent": {
+          "primary_goal": "assistant_chat",
+          "is_follow_up": false,
+          "confidence": 0.93,
+          "intent_rationale_zh": "問候並詢問助理身份，身份題優先於問候。"
+        },
+        "content": {
+          "has_reviewable_body": false,
+          "artifact_text": null,
+          "user_comment": "你好，你是誰",
+          "body_source": "inline",
+          "contains_url": false,
+          "contains_phone": false,
+          "contains_financial_terms": false,
+          "scam_signal_tags": [],
+          "text_length": 6
+        },
+        "social": {
+          "mentions_relation": false,
+          "relation_category": null,
+          "relation_label": null,
+          "relation_name": null,
+          "on_behalf_of_other": false
+        },
+        "gaps": {
+          "missing_body_for_review": false,
+          "needs_profile_relation_confirm": false,
+          "out_of_product_scope": false
+        },
+        "capabilities": {
+          "required_types": ["direct_response"],
+          "domain_tags": ["identity_assistant"],
+          "suggested_skills": ["quick_reply"],
+          "is_multi_step": false
+        }
+      }
+    },
+    {
+      "id": "fs_identity_user",
+      "tags": ["assistant_chat", "identity"],
+      "user_input": "我是誰",
+      "context_hints": {
+        "input_origin": "chat_box",
+        "artifact_from_api": ""
+      },
+      "output": {
+        "turn_intent": {
+          "primary_goal": "assistant_chat",
+          "is_follow_up": false,
+          "confidence": 0.94,
+          "intent_rationale_zh": "詢問使用者自己的稱呼，不是回想親友關係。"
+        },
+        "content": {
+          "has_reviewable_body": false,
+          "artifact_text": null,
+          "user_comment": "我是誰",
+          "body_source": "inline",
+          "contains_url": false,
+          "contains_phone": false,
+          "contains_financial_terms": false,
+          "scam_signal_tags": [],
+          "text_length": 3
+        },
+        "social": {
+          "mentions_relation": false,
+          "relation_category": null,
+          "relation_label": null,
+          "relation_name": null,
+          "on_behalf_of_other": false
+        },
+        "gaps": {
+          "missing_body_for_review": false,
+          "needs_profile_relation_confirm": false,
+          "out_of_product_scope": false
+        },
+        "capabilities": {
+          "required_types": ["direct_response"],
+          "domain_tags": ["identity_user"],
+          "suggested_skills": ["quick_reply"],
+          "is_multi_step": false
+        }
+      }
+    },
+    {
+      "id": "fs_weather_oos",
+      "tags": ["out_of_scope", "weather"],
+      "user_input": "明天台北會下雨嗎",
+      "context_hints": {
+        "input_origin": "chat_box",
+        "artifact_from_api": ""
+      },
+      "output": {
+        "turn_intent": {
+          "primary_goal": "out_of_scope",
+          "is_follow_up": false,
+          "confidence": 0.97,
+          "intent_rationale_zh": "詢問天氣，產品尚未提供，應禮貌拒答並引導送審。"
+        },
+        "content": {
+          "has_reviewable_body": false,
+          "artifact_text": null,
+          "user_comment": "明天台北會下雨嗎",
+          "body_source": "inline",
+          "contains_url": false,
+          "contains_phone": false,
+          "contains_financial_terms": false,
+          "scam_signal_tags": [],
+          "text_length": 9
+        },
+        "social": {
+          "mentions_relation": false,
+          "relation_category": null,
+          "relation_label": null,
+          "relation_name": null,
+          "on_behalf_of_other": false
+        },
+        "gaps": {
+          "missing_body_for_review": false,
+          "needs_profile_relation_confirm": false,
+          "out_of_product_scope": true
+        },
+        "capabilities": {
+          "required_types": ["direct_response"],
+          "domain_tags": ["out_of_scope"],
+          "suggested_skills": ["quick_reply"],
           "is_multi_step": false
         }
       }

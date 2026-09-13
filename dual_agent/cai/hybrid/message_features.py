@@ -52,15 +52,30 @@ def _fallback_features(user_text: str) -> MessageFeatures:
         capabilities=CapabilityFeatures(
             required_types=["direct_response"],
             domain_tags=["out_of_scope"],
+            suggested_skills=["quick_reply"],
         ),
     )
 
 
-def _format_fewshots(max_examples: int = 3) -> str:
+def _format_fewshots(max_examples: int = 6) -> str:
     data = load_fewshots("message_features.json")
-    examples = data.get("examples") or []
-    picked = examples[:max_examples]
-    return json.dumps(picked, ensure_ascii=False, indent=2)
+    examples = [e for e in (data.get("examples") or []) if isinstance(e, dict)]
+    preferred = (
+        "fs_review_inline",
+        "fs_missing_body",
+        "fs_greet",
+        "fs_identity_assistant",
+        "fs_out_scope",
+        "fs_capability",
+    )
+    by_id = {str(e.get("id") or ""): e for e in examples}
+    picked: list[dict] = [by_id[i] for i in preferred if i in by_id]
+    for row in examples:
+        if len(picked) >= max_examples:
+            break
+        if row not in picked:
+            picked.append(row)
+    return json.dumps(picked[:max_examples], ensure_ascii=False, indent=2)
 
 
 def _build_user_message(
@@ -73,6 +88,11 @@ def _build_user_message(
     pending_review: bool,
     pending_memory_confirm: bool,
 ) -> str:
+    from dual_agent.cai.work_record import format_work_record_for_prompt
+
+    snap = task_snapshot if isinstance(task_snapshot, dict) else {}
+    work_txt = format_work_record_for_prompt(snap)
+    last_q = str(snap.get("last_question") or "").strip()
     parts = [
         "【本輪使用者輸入】",
         user_text or "",
@@ -84,8 +104,14 @@ def _build_user_message(
         "【Context Pack】",
         (context_pack or "").strip() or "（無）",
         "",
+        "【工作紀錄】",
+        work_txt or "（目前無工作紀錄）",
+        "",
+        "【上一輪問題】",
+        last_q or "（無）",
+        "",
         "【上一輪任務狀態 JSON】",
-        json.dumps(task_snapshot or {}, ensure_ascii=False),
+        json.dumps(snap or {}, ensure_ascii=False),
         "",
         "【待確認旗標】",
         f"pending_review={pending_review}",

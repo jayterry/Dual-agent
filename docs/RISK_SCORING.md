@@ -44,7 +44,8 @@ dual_path_analyze
 
 `known_relations` 經 `sender_tech_context` 傳入雙路推斷。環境變數同前（`DAI_DUAL_INFER_*`）。CAI 防詐敘事不再被 Memory 捷徑攔截（階段1）。
 
-環境變數：`DAI_DUAL_PATH_B`（預設開）、`DAI_DUAL_NARRATOR`（預設開）。
+環境變數：`DAI_DUAL_PATH_B`（預設開）、`DAI_DUAL_NARRATOR`（預設開）。  
+Context 後端：`DAI_CONTEXT_BACKEND`＝`auto`（預設，**GNN → HistGBDT → 規則**）／`hetero`／`learned`／`rules`。權重優先 `DAI_HETERO_MODEL_PATH`，否則 `data/fraud_dual_models/context_hetero_ranking_full.pt`，否則 `context_hetero.pt`。`path_a.context_backend` 回報實際後端。
 
 ### 後續計畫：依常用 App 擴充 `channel` 節點（未開工）
 

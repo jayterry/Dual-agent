@@ -35,6 +35,7 @@ from dual_agent.cai.hybrid.feedback import (
 from dual_agent.cai.hybrid.gates import allowed_skills_for, filter_tool_catalog
 from dual_agent.cai.hybrid.message_features import invoke_message_features
 from dual_agent.cai.hybrid.recall import try_recall_relation_shortcut
+from dual_agent.cai.hybrid.quick_reply import try_quick_reply_shortcut
 from dual_agent.cai.hybrid.schemas import MessageFeatures
 from dual_agent.cai.hybrid.validate import validate_planner_from_features
 from dual_agent.cai.memory_direct import try_handle_memory_turn
@@ -44,6 +45,7 @@ from dual_agent.cai.planner_validate import validate_planner_output
 from dual_agent.cai.replan_llm import invoke_replan
 from dual_agent.cai.schemas import PlanExecuteOutcome, PlanStep, ReplanOutput
 from dual_agent.cai.review_entry_eligibility import (
+    looks_like_review_declined,
     looks_like_review_intent_without_artifact,
     should_abandon_pending_review,
 )
@@ -60,9 +62,16 @@ from dual_agent.ingress import (
 from dual_agent.skill_types import SkillContext, SkillResult
 from dual_agent.skills_registry import get_tool_catalog_cai, parse_inline_skill_calls, strip_inline_skill_calls
 
-_OUT_SCOPE_ANSWER = "我主要協助檢視可疑訊息與詐騙風險，請貼上完整內容。"
 _REVIEW_ASK_USER_QUESTION = "請貼上完整簡訊或訊息內容，我才能幫您審查風險。"
 _REVIEW_ASK_USER_ANSWER = _REVIEW_ASK_USER_QUESTION
+
+
+def _sanitize_chat_input(text: str) -> str:
+    """移除聊天框偶發的前缀拉丁字元（如輸入法選字殘留 v我收到）。"""
+    t = (text or "").strip()
+    if len(t) >= 2 and t[0].isascii() and t[0].isalpha() and ord(t[1]) >= 0x4E00:
+        return t[1:].lstrip()
+    return t
 
 
 def _out_plan(initial: list[PlanStep], executed: list[PlanStep]) -> list[PlanStep]:
@@ -122,6 +131,8 @@ def _review_ask_user_step() -> PlanStep:
 
 
 def _set_pending_review(ctx: SkillContext, ingress: IngressPayload) -> None:
+    from dual_agent.cai.work_record import on_waiting_for_body, sync_snapshot_to_ctx
+
     ctx.policy_state["pending_review"] = {
         "active": True,
         "source_turn": ingress.raw_input_text,
@@ -134,12 +145,122 @@ def _set_pending_review(ctx: SkillContext, ingress: IngressPayload) -> None:
         "expected_task": "check",
     }
     ctx.policy_state["pending_user_question"] = _REVIEW_ASK_USER_QUESTION
+    snap = on_waiting_for_body(
+        _task_snapshot_from_ctx(ctx),
+        question=_REVIEW_ASK_USER_QUESTION,
+        turn_relation="continue",
+    )
+    sync_snapshot_to_ctx(ctx, snap)
 
 
 def _clear_pending_review(ctx: SkillContext) -> None:
+    """只清旗標；完成／取消／切換須由呼叫端先更新 work record。"""
     ctx.policy_state.pop("pending_review", None)
     ctx.policy_state.pop("pending_task", None)
     ctx.policy_state.pop("pending_user_question", None)
+
+
+def _cancel_pending_review_work(ctx: SkillContext) -> None:
+    from dual_agent.cai.work_record import on_cancel, sync_snapshot_to_ctx
+
+    snap = on_cancel(_task_snapshot_from_ctx(ctx))
+    sync_snapshot_to_ctx(ctx, snap)
+    _clear_pending_review(ctx)
+
+
+def _apply_features_to_work_record(
+    ctx: SkillContext,
+    features: MessageFeatures,
+    *,
+    ingress: IngressPayload,
+) -> None:
+    """依 NLP 本輪關係更新工作紀錄；aside／範圍外不取消；明確 cancel／switch 才結束或換單。"""
+    from dual_agent.cai.work_record import (
+        apply_turn_relation,
+        is_work_open,
+        on_aside,
+        on_body_ready,
+        on_follow_up,
+        on_pause,
+        start_work,
+        sync_snapshot_to_ctx,
+    )
+
+    snap = dict(_task_snapshot_from_ctx(ctx) or {})
+    rel = (features.turn_relation or "").strip().lower() or None
+    intent = str(features.turn_intent.intent or "").strip().lower()
+    goal = features.primary_goal
+    has_body = bool(features.content.has_reviewable_body) or bool(
+        (ingress.artifact_text or "").strip()
+    )
+
+    if intent == "pause_work":
+        sync_snapshot_to_ctx(ctx, on_pause(snap))
+        return
+
+    if rel == "cancel" or looks_like_review_declined((ingress.raw_input_text or "").strip()):
+        if bool(ctx.policy_state.get("pending_review")) or is_work_open(snap):
+            _cancel_pending_review_work(ctx)
+        return
+
+    if rel == "switch" and has_body:
+        new_snap = start_work(
+            goal="審查可疑簡訊風險",
+            status="active",
+            keep_background={"task_type": "check"},
+        )
+        new_snap = on_body_ready(new_snap, turn_relation="switch")
+        sync_snapshot_to_ctx(ctx, new_snap)
+        return
+
+    if goal == "follow_up_review":
+        sync_snapshot_to_ctx(ctx, on_follow_up(snap))
+        return
+
+    if rel == "aside" or goal in ("assistant_chat", "out_of_scope"):
+        if is_work_open(snap) or bool(ctx.policy_state.get("pending_review")):
+            sync_snapshot_to_ctx(ctx, on_aside(snap if snap else _task_snapshot_from_ctx(ctx)))
+        elif snap:
+            sync_snapshot_to_ctx(ctx, apply_turn_relation(snap, "aside"))
+        return
+
+    if has_body and (
+        goal in ("review_sms",)
+        or str(snap.get("waiting_for") or "") == "reviewable_body"
+        or bool(ctx.policy_state.get("pending_review"))
+    ):
+        sync_snapshot_to_ctx(ctx, on_body_ready(snap, turn_relation=rel or "continue"))
+        return
+
+    if rel and snap:
+        sync_snapshot_to_ctx(ctx, apply_turn_relation(snap, rel))
+
+
+def _sync_work_after_call_dai(ctx: SkillContext, result: SkillResult, ingress: IngressPayload) -> None:
+    from dual_agent.cai.work_record import on_dai_failure, on_dai_success, sync_snapshot_to_ctx, work_id_matches
+
+    snap = _task_snapshot_from_ctx(ctx)
+    expected = str((result.data or {}).get("work_id") or (snap or {}).get("work_id") or "")
+    if expected and snap and not work_id_matches(snap, expected):
+        return
+    if result.ok:
+        dai = (result.data or {}).get("dai") if isinstance(result.data, dict) else None
+        art = (ingress.artifact_text or "").strip()
+        if not art and isinstance(result.data, dict):
+            art = str((result.data or {}).get("artifact") or "").strip()
+        new_snap = on_dai_success(
+            snap,
+            dai=dai if isinstance(dai, dict) else {},
+            artifact=art,
+            input_origin=str(ingress.input_origin or ""),
+        )
+        sync_snapshot_to_ctx(ctx, new_snap)
+        _clear_pending_review(ctx)
+    else:
+        sync_snapshot_to_ctx(
+            ctx,
+            on_dai_failure(snap, error=str(result.error or result.summary or "dai_failed")),
+        )
 
 
 def _ingress_has_review_artifact(ingress: IngressPayload) -> bool:
@@ -581,6 +702,8 @@ def _run_replan_loop(
                 raw_input_text=str(ingress_dict.get("raw_input_text") or normalized_turn),
                 input_origin=str(ingress_dict.get("input_origin") or "chat_box"),
             )
+            if st.skill == "call_dai":
+                _sync_work_after_call_dai(ctx, r, ingress_obj)
             meta_out = _handle_call_dai_meta_only_failure(
                 r,
                 ctx,
@@ -789,6 +912,7 @@ def run_plan_and_execute(
     guard_source: str | None = None,
     context_pack: str | None = None,
 ) -> PlanExecuteOutcome:
+    user_text = _sanitize_chat_input(user_text)
     ctx = ctx or SkillContext(user_input=user_text)
     ctx.user_input = user_text
     init_turn_trace(ctx)
@@ -822,7 +946,7 @@ def run_plan_and_execute(
         ingress_artifact_text=(ingress.artifact_text or "").strip(),
         pending_review=True,
     ):
-        _clear_pending_review(ctx)
+        _cancel_pending_review_work(ctx)
         had_pending_review = False
 
     if _should_direct_review_ask_user(ingress):
@@ -847,11 +971,19 @@ def run_plan_and_execute(
         )
         ctx.policy_state["message_features"] = features.model_dump()
         record_message_features(ctx, features)
+        _apply_features_to_work_record(ctx, features, ingress=ingress)
+        snap = _task_snapshot_from_ctx(ctx)
+        had_pending_review = bool(ctx.policy_state.get("pending_review"))
         recalled = try_recall_relation_shortcut(features, ctx=ctx)
         if recalled is not None:
             return _finalize_outcome(ctx, recalled)
-        if features.primary_goal == "out_of_scope":
-            return _finalize_outcome(ctx, _outcome_from_direct_answer(_OUT_SCOPE_ANSWER))
+        quick = try_quick_reply_shortcut(
+            features,
+            ctx=ctx,
+            requires_dai=bool(ingress.requires_dai),
+        )
+        if quick is not None:
+            return _finalize_outcome(ctx, quick)
 
     # Memory LLM 短路（Hybrid 啟用時略過，改由 NLP + profile skill 處理）
     pending_mem = ctx.policy_state.get("pending_memory_confirm")
@@ -944,21 +1076,18 @@ def run_plan_and_execute(
     task_type = task_type_v
     task_state = task_state_v
     po_message = msg_v
-    record_planner_todos(ctx, initial_plan)
+    record_planner_todos(ctx, initial_plan, message=po_message)
 
     if bool(ctx.policy_state.get("pending_review")):
         art = (ingress.artifact_text or "").strip()
-        pivoted = features is not None and features.primary_goal == "out_of_scope" and not any(
-            s.skill == "ask_user"
-            and "簡訊" in str((s.args or {}).get("question", ""))
-            for s in v_todos
-        )
+        rel = (features.turn_relation if features is not None else None)
         if should_abandon_pending_review(
             normalized_turn,
             ingress_artifact_text=art,
             pending_review=True,
-        ) or (pivoted and task_type_v in ("action", "direct_response")):
-            _clear_pending_review(ctx)
+            turn_relation=rel,
+        ):
+            _cancel_pending_review_work(ctx)
 
     active_pending_review = bool(ctx.policy_state.get("pending_review"))
     results: list[SkillResult] = []

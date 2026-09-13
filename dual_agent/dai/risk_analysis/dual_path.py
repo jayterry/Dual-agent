@@ -21,6 +21,15 @@ from dual_agent.dai.risk_analysis.review_display import (
     enrich_report_display_fields,
     verdict_display,
 )
+from dual_agent.dai.risk_analysis.user_cards import (
+    INSTRUCTION_165,
+    build_card_suggestions,
+    build_context_factor_labels,
+    build_headline,
+    build_limitations,
+    build_threat_clues,
+    format_user_display,
+)
 from dual_agent.dai.risk_analysis.verdict import recommended_cai_action, verdict_from_score
 from dual_agent.dai.schemas import DAIRequest
 
@@ -50,12 +59,18 @@ _CHANNEL_FROM_SOURCE: dict[str, str] = {
 }
 
 
-def _clamp01(x: float) -> float:
-    return max(0.0, min(1.0, float(x)))
-
-
 def score01_to_100(score: float) -> int:
-    return int(round(_clamp01(score) * 100))
+    """0–1 → 0–100。若已是百分制（>1.5，例如 20）直接四捨五入，避免再乘 100 變成 100。"""
+    x = float(score)
+    if x < 0:
+        return 0
+    if x <= 1.0:
+        return int(round(x * 100))
+    if x <= 1.5:
+        return 100
+    if x <= 100:
+        return int(round(x))
+    return 100
 
 
 def _pick_closed(raw: Any, allowed: tuple[str, ...], default: str) -> str:
@@ -499,75 +514,42 @@ def path_b_warnings(result_b: ResultB) -> list[str]:
 def format_dual_display(
     *,
     path_a: dict[str, Any],
-    path_b: dict[str, Any] | None,
-    gate_score: int,
-    verdict: str,
-    narrator: str | None,
-    suggestions: list[str],
+    path_b: dict[str, Any] | None = None,
+    gate_score: int = 0,
+    verdict: str = "allow",
+    narrator: str | None = None,
+    suggestions: list[str] | None = None,
+    headline: str = "",
+    instruction: str = "",
+    limitations: list[str] | None = None,
 ) -> str:
-    lines = [
-        f"門檻分數（CAI）：{gate_score}/100　判定：{verdict_display(verdict)}",
-        "",
-        "—— Path A（ML Threat + Context）——",
-        f"Threat：{path_a.get('threat_score_100', 0)}/100",
-        f"Context：{path_a.get('context_score_100', 0)}/100",
-        f"類型：{path_a.get('scam_type', 'Unknown')}",
-        "原因：",
-    ]
-    for r in path_a.get("reasons") or []:
-        lines.append(f"• {r}")
-    lines.append("警示：")
-    for w in path_a.get("warnings") or []:
-        lines.append(f"• {w}")
-
-    lines.append("")
-    lines.append("—— Path B（純 LLM）——")
-    if not path_b or path_b.get("skipped"):
-        note = (path_b or {}).get("note") or "略過或失敗"
-        lines.append(f"（{note}）")
-    else:
-        lines.append(f"Threat：{path_b.get('threat_score_100', 0)}/100")
-        lines.append(f"Context：{path_b.get('context_score_100', 0)}/100")
-        lines.append(f"類型：{path_b.get('scam_type', 'Unknown')}")
-        lines.append("原因：")
-        for r in path_b.get("reasons") or []:
-            lines.append(f"• {r}")
-        lines.append("警示：")
-        for w in path_b.get("warnings") or []:
-            lines.append(f"• {w}")
-
-    if narrator:
-        lines.append("")
-        lines.append("—— LLM 分析報告 ——")
-        lines.append(narrator.strip()[:900])
-
-    if suggestions:
-        lines.append("")
-        lines.append("建議：")
-        for s in suggestions:
-            lines.append(f"• {s}")
-    return "\n".join(lines).strip()
+    del path_b, gate_score  # 使用者向文案不露出 Path B／閘道公式
+    return format_user_display(
+        headline=headline,
+        instruction=instruction or (INSTRUCTION_165 if headline else ""),
+        threat_score_100=int(path_a.get("threat_score_100") or 0),
+        context_score_100=int(path_a.get("context_score_100") or 0),
+        threat_clues=list(path_a.get("threat_clues") or []),
+        context_factors=list(path_a.get("context_factors") or []),
+        context_backend=str(path_a.get("context_backend") or ""),
+        limitations=list(limitations or []),
+        narrator=narrator,
+        suggestions=list(suggestions or []),
+    )
 
 
-_NARRATOR_SYSTEM = """你是反詐騙助手的解說員（Narrator）。
-任務：用繁體中文、簡潔清楚，向「這位使用者」解釋分數；解釋情境分時必須個人化。
+_NARRATOR_SYSTEM = """你是防詐助手，用像跟朋友說話的繁體中文，解釋為什麼這則訊息要小心。
 
-分數定義（必須遵守）：
-- 威脅分：訊息內容像不像詐騙話術。
-- 情境分：在「此人設／推斷關係／管道熟悉度」下是否特別危險。低分＝對此人的情境加權未觸發，不是缺資料、不是安全。
-- 閘道分：max(威脅, 情境)。
+寫法：
+- 短句、口語、2～4 小段即可。不要條列標題、不要 Markdown。
+- 先講「這則內容聽起來…」（話術、連結、下載、催促），再講「以你平常的用法來看…」。
+- 可以自然帶 1～2 個真實人設（例如常用 App、這則關係），不要報欄位名、不要硬點滿三項。
+- 結尾一句務實建議（自己開官方 App 查、必要時打 165）。不要重複限制格的免責全文。
 
-個人化硬規則（違規即失敗）：
-1. 解釋情境分時，必須明確點名至少 3 項實際提供的個人化欄位，並寫出其值，例如：
-   「你的年齡帶是 25-39」「職業設定為 office（上班族）」「常用管道含 SMS」「投資經驗：無／有填寫內容」「本則關係推斷為 Official」。
-2. 必須說明這些欄位如何影響情境分（觸發或未觸發哪類加權），不可只講空泛的「依個人情況」。
-3. 不得捏造未提供的欄位；若 invest_exp 為空，要說「未填投資經驗」或「投資經驗未設定」。
-4. 禁止：「沒提供背景所以情境 0」「資料不足所以 0」「情境 0＝沒風險」。
-
-輸出結構（勿用 # 標題）：
-1) 分數怎麼來：分開講威脅／情境；情境段必須含個人化點名。
-2) 判斷依據：引用 reasons／warnings 與推斷關係／管道。
-3) 你可以怎麼做：一句務實建議。
+禁止：
+- 內部詞：Path A、Path B、Threat、Context、閘道、ML、GNN、backend。
+- 說缺資料所以安全、情境分低＝沒風險、重算或改分數、捏造沒提供的事實。
+- 若要講數字：話術／線索分只能用 threat_score_100，情境分只能用 context_score_100。禁止把 gate_score_100 講成線索分或威脅分。
 
 只輸出說明文字，不要 JSON。"""
 
@@ -696,9 +678,9 @@ def run_narrator(
         "path_b_reference": path_b_summary,
     }
     user = (
-        "請依下列資料撰寫個人化分析報告。"
-        "解釋情境分時，必須逐一引用 must_cite_these_user_facts 中至少 3 項（含數值／選項原文），"
-        "並說明它們如何讓情境分偏高或偏低。禁止說缺背景。勿重算分數：\n"
+        "請用口語寫給這位使用者看的分析（2～4 小段）。"
+        "可自然提到 1～2 項 must_cite_these_user_facts，不要報欄位清單。"
+        "禁止說缺背景所以安全。勿重算分數：\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
     cfg = OllamaConfig(
@@ -708,14 +690,7 @@ def run_narrator(
         timeout_s=float(os.environ.get("NARRATOR_TIMEOUT", "90")),
     )
     raw = chat_text(system=_NARRATOR_SYSTEM, user=user, config=cfg)
-    text = _normalize_narrator_text(raw)[:900]
-    # 若模型仍未點名關鍵欄位，附加可稽核個人化摘要（保證使用者看得到）
-    keys = ("年齡帶", "職業", "常用管道", "投資經驗", "推斷關係", "推斷管道")
-    cited = sum(1 for k in keys if k in text)
-    if cited < 2 and persona_lines:
-        footer = "【本輪個人化參照】" + "；".join(persona_lines[:6])
-        text = (text + "\n\n" + footer).strip()[:900]
-    return text
+    return _normalize_narrator_text(raw)[:900]
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -772,6 +747,18 @@ def analyze_response_to_report(
     verdict = verdict_from_score(gate)
     action = recommended_cai_action(verdict, gate, r_rules=0)
 
+    shared = resp.shared_features
+    relation = str(persona.get("relation_type") or "Unknown")
+    threat_clues = build_threat_clues(text, shared)
+    context_factors = build_context_factor_labels(
+        shared=shared,
+        persona=persona,
+        result_a=ra,
+    )
+    limitations = build_limitations(relation=relation)
+    headline = build_headline(verdict, threat100)
+    instruction = INSTRUCTION_165 if headline else ""
+    context_backend = str(getattr(ra, "context_backend", "") or "")
     path_a_block = {
         "threat_score": ra.threat_score,
         "context_score": ra.context_score,
@@ -780,11 +767,15 @@ def analyze_response_to_report(
         "scam_type": ra.scam_type,
         "intent_confidence": ra.intent_confidence,
         "threat_missing": ra.threat_missing,
+        "context_backend": context_backend,
+        "factors": list(getattr(ra, "context_factors", None) or []),
+        "threat_clues": threat_clues,
+        "context_factors": context_factors,
         "reasons": path_a_reasons(
             ra,
             text=text,
             channel=str(persona.get("channel") or ""),
-            relation=str(persona.get("relation_type") or ""),
+            relation=relation,
             primary_apps=list(persona.get("primary_apps") or []),
         ),
         "warnings": path_a_warnings(ra),
@@ -815,12 +806,10 @@ def analyze_response_to_report(
     narrator_note = ""
     # Narrator 由外層注入（此函式可直接用 resp.narrator_text）
 
-    suggestions = list(path_a_block["warnings"][:2])
-    if path_b_block and not path_b_block.get("skipped"):
-        for w in path_b_block.get("warnings") or []:
-            if w not in suggestions:
-                suggestions.append(w)
-    suggestions = suggestions[:5]
+    suggestions = build_card_suggestions(
+        verdict=verdict,
+        existing=list(path_a_block["warnings"][:2]),
+    )
 
     display = format_dual_display(
         path_a=path_a_block,
@@ -829,6 +818,9 @@ def analyze_response_to_report(
         verdict=verdict,
         narrator=narrator_text,
         suggestions=suggestions,
+        headline=headline,
+        instruction=instruction,
+        limitations=limitations,
     )
 
     labels = [str(ra.scam_type)]
@@ -874,8 +866,11 @@ def analyze_response_to_report(
                 "scam_type": ra.scam_type,
             }
         ],
+        "headline": headline,
+        "instruction": instruction,
+        "limitations": limitations,
         "reason_highlights": list(path_a_block["reasons"]),
-        "user_reason_highlights": list(path_a_block["reasons"]),
+        "user_reason_highlights": list(threat_clues or path_a_block["reasons"]),
         "user_suggestions": suggestions,
         "display_text": display,
         "safety_summary": brief_safety_line(gate, verdict)
@@ -889,9 +884,12 @@ def analyze_response_to_report(
     }
     enrich_report_display_fields(report, text=text, source=source)
     # enrich 會覆寫 display／reasons；雙路版再寫回
-    report["user_reason_highlights"] = list(path_a_block["reasons"])
+    report["user_reason_highlights"] = list(threat_clues or path_a_block["reasons"])
     report["user_suggestions"] = suggestions
     report["display_text"] = display
+    report["headline"] = headline
+    report["instruction"] = instruction
+    report["limitations"] = limitations
     if narrator_text:
         report["safety_summary"] = str(narrator_text)[:400]
     return report
@@ -909,7 +907,12 @@ def run_dual_path_analysis(
     pipeline_ctx: Any | None = None,
 ) -> dict[str, Any]:
     """執行雙路分析並回傳 DAI report dict。"""
-    from dual_agent.cai.pipeline_progress import advance_dual_phase
+    from dual_agent.cai.pipeline_progress import (
+        advance_dual_phase,
+        append_infer_thinking,
+        append_path_a_thinking,
+        append_path_b_thinking,
+    )
 
     persona = persona_from_request(req, source=source)
     text = (req.artifact or req.user_text or "").strip()
@@ -945,6 +948,7 @@ def run_dual_path_analysis(
     )
     persona["relation_type"] = rel_meta["relation_type"]
     persona["relation_inferred"] = rel_meta
+    append_infer_thinking(pipeline_ctx, channel_meta=ch_meta, relation_meta=rel_meta)
 
     analyze_req = build_analyze_request(
         req,
@@ -973,6 +977,29 @@ def run_dual_path_analysis(
                 path_b_note = detail
             else:
                 path_b_note = "Path B skipped or failed"
+        if resp.result_b is not None:
+            rb = resp.result_b
+            append_path_b_thinking(
+                pipeline_ctx,
+                explanation=str(rb.explanation or ""),
+            )
+        elif path_b_note:
+            append_path_b_thinking(pipeline_ctx, skipped_note=path_b_note)
+        # 線索／情境分放最後，與風險卡同一數字（思考區會自動捲到最底）。
+        if resp.result_a is not None:
+            ra = resp.result_a
+            append_path_a_thinking(
+                pipeline_ctx,
+                threat100=score01_to_100(ra.threat_score),
+                context100=score01_to_100(ra.context_score),
+                scam_type=str(ra.scam_type or ""),
+                clues=build_threat_clues(text, resp.shared_features),
+                factors=build_context_factor_labels(
+                    shared=resp.shared_features,
+                    persona=persona,
+                    result_a=ra,
+                ),
+            )
     finally:
         if prev_host is None:
             os.environ.pop("OLLAMA_HOST", None)
